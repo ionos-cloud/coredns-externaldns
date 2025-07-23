@@ -1,0 +1,173 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-externaldns
+  namespace: default
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+            lameduck 5s
+        }
+        ready
+        
+        # Enable prometheus metrics
+        prometheus
+        
+        debug
+
+        # External-DNS plugin for DNSEndpoint CRDs
+        externaldns {
+            namespace ""        # Watch all namespaces, or specify a namespace
+            ttl 300            # Default TTL
+            debug              # Enable debug logging
+        }
+        
+        # Forward to upstream DNS
+        forward . /etc/resolv.conf {
+            max_concurrent 1000
+        }
+        
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: coredns-externaldns
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: coredns-externaldns
+rules:
+- apiGroups: ["externaldns.k8s.io"]
+  resources: ["dnsendpoints"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: coredns-externaldns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: coredns-externaldns
+subjects:
+- kind: ServiceAccount
+  name: coredns-externaldns
+  namespace: default
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coredns-externaldns
+  namespace: default
+  labels:
+    k8s-app: coredns-externaldns
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      k8s-app: coredns-externaldns
+  template:
+    metadata:
+      labels:
+        k8s-app: coredns-externaldns
+    spec:
+      serviceAccountName: coredns-externaldns
+      containers:
+      - name: coredns
+        image: coredns-externaldns-standalone:latest  # Use your custom build with the plugin
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 200m
+            memory: 170Mi
+          requests:
+            cpu: 100m
+            memory: 70Mi
+        args: [ "-conf", "/etc/coredns/Corefile" ]
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/coredns
+          readOnly: true
+        ports:
+        - containerPort: 53
+          name: dns
+          protocol: UDP
+        - containerPort: 53
+          name: dns-tcp
+          protocol: TCP
+        - containerPort: 9153
+          name: metrics
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 60
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 5
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8181
+            scheme: HTTP
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_BIND_SERVICE
+            drop:
+            - all
+          readOnlyRootFilesystem: true
+      dnsPolicy: Default
+      volumes:
+        - name: config-volume
+          configMap:
+            name: coredns-externaldns
+            items:
+            - key: Corefile
+              path: Corefile
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coredns-externaldns
+  namespace: default
+  labels:
+    k8s-app: coredns-externaldns
+  annotations:
+    prometheus.io/port: "9153"
+    prometheus.io/scrape: "true"
+spec:
+  type: NodePort
+  selector:
+    k8s-app: coredns-externaldns
+  ports:
+  - name: dns
+    port: 53
+    protocol: UDP
+  - name: dns-tcp
+    port: 53
+    protocol: TCP
+  - name: metrics
+    port: 9153
+    protocol: TCP

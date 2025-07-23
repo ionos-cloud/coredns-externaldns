@@ -1,0 +1,63 @@
+# Example Corefile for CoreDNS with external-dns plugin
+# This file shows how to configure an existing CoreDNS installation with the external-dns plugin
+# Use this when you want to add the plugin to an existing CoreDNS deployment
+
+.:53 {
+    # Error logging
+    errors
+
+    # Health check endpoint
+    health :8080
+
+    # Ready check endpoint  
+    ready :8181
+
+    # External-DNS plugin - watches DNSEndpoint CRDs
+    externaldns {
+        # Watch all namespaces (default) or specify a specific namespace
+        namespace ""
+        
+        # Default TTL for records (5 minutes)
+        ttl 300
+        
+        # Enable debug logging
+        debug
+    }
+
+    # Kubernetes plugin for cluster.local domains
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+        pods insecure
+        fallthrough in-addr.arpa ip6.arpa
+        ttl 30
+    }
+
+    # Forward to upstream DNS servers
+    forward . 8.8.8.8 8.8.4.4 {
+        max_concurrent 1000
+    }
+
+    # Cache responses for 30 seconds
+    cache 30
+
+    # Detect forwarding loops
+    loop
+
+    # Reload configuration automatically
+    reload
+
+    # Load balance between upstream servers
+    loadbalance
+}
+
+# Optional: Separate configuration for a specific domain
+example.com:53 {
+    errors
+    
+    externaldns {
+        namespace "production"  # Only watch production namespace
+        ttl 600                 # Longer TTL for production
+        debug
+    }
+    
+    # No forwarding for this domain - only serve from external-dns
+}

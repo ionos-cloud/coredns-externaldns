@@ -1,0 +1,104 @@
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: example-app
+  namespace: default
+spec:
+  endpoints:
+  # A record for main application
+  - dnsName: app.example.com
+    recordType: A
+    recordTTL: 300
+    targets:
+    - 192.168.1.10
+    - 192.168.1.11
+  
+  # CNAME for www subdomain
+  - dnsName: www.example.com
+    recordType: CNAME
+    recordTTL: 300
+    targets:
+    - app.example.com
+  
+  # Wildcard CNAME for API services
+  - dnsName: "*.api.example.com"
+    recordType: CNAME
+    recordTTL: 600
+    targets:
+    - app.example.com
+  
+  # MX records for email
+  - dnsName: example.com
+    recordType: MX
+    recordTTL: 300
+    targets:
+    - "10 mail1.example.com"
+    - "20 mail2.example.com"
+  
+  # TXT records for verification
+  - dnsName: example.com
+    recordType: TXT
+    recordTTL: 300
+    targets:
+    - "v=spf1 include:_spf.google.com ~all"
+    - "google-site-verification=abcd1234"
+  
+  # SRV record for service discovery
+  - dnsName: _http._tcp.example.com
+    recordType: SRV
+    recordTTL: 300
+    targets:
+    - "10 60 8080 app1.example.com"
+    - "10 40 8080 app2.example.com"
+
+---
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: database-endpoints
+  namespace: default
+spec:
+  endpoints:
+  # Database A records
+  - dnsName: db.example.com
+    recordType: A
+    recordTTL: 600
+    targets:
+    - 10.0.1.100
+  
+  # Database CNAME
+  - dnsName: database.example.com
+    recordType: CNAME
+    recordTTL: 300
+    targets:
+    - db.example.com
+  
+  # PTR record for reverse DNS
+  - dnsName: 100.1.0.10.in-addr.arpa
+    recordType: PTR
+    recordTTL: 300
+    targets:
+    - db.example.com
+
+---
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: multi-namespace-test
+  namespace: test-namespace
+spec:
+  endpoints:
+  # Test records in different namespace
+  - dnsName: test.example.com
+    recordType: A
+    recordTTL: 120
+    targets:
+    - 172.16.1.50
+  
+  # IPv6 AAAA record
+  - dnsName: ipv6.example.com
+    recordType: AAAA
+    recordTTL: 300
+    targets:
+    - 2001:db8::1
+    - 2001:db8::2

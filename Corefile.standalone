@@ -1,0 +1,29 @@
+# Example Corefile for standalone CoreDNS with externaldns plugin
+.:53 {
+    # Enable debug logging (optional)
+    log
+    
+    # Handle errors gracefully
+    errors
+    
+    # Health check endpoint
+    health
+    
+    # Enable prometheus metrics
+    prometheus
+    
+    # External DNS plugin configuration
+    externaldns {
+        # Optional: specify namespace to watch (default: all namespaces)
+        # namespace default
+        
+        # Optional: set default TTL in seconds (default: 300)
+        ttl 300
+        
+        # Optional: enable debug logging
+        # debug
+    }
+    
+    # Forward queries not handled by externaldns to upstream DNS
+    forward . 8.8.8.8 8.8.4.4
+}
