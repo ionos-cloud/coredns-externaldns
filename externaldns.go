@@ -31,8 +31,9 @@ var log = clog.NewWithPlugin("externaldns")
 type ExternalDNS struct {
 	Next plugin.Handler
 
-	namespace string
-	ttl       uint32
+	namespace             string
+	ttl                   uint32
+	metricsUpdateInterval time.Duration
 
 	client dynamic.Interface
 	cache  *DNSCache
@@ -44,7 +45,10 @@ type ExternalDNS struct {
 type DNSCache struct {
 	sync.RWMutex
 
-	zones map[string]*Zone // zone -> Zone info
+	zones                 map[string]*Zone // zone -> Zone info
+	metricsUpdateInterval time.Duration
+	metricsStopCh         chan struct{}
+	metricsStoppedCh      chan struct{}
 }
 
 // Zone represents a DNS zone
@@ -66,9 +70,50 @@ type DNSRecord struct {
 }
 
 // NewDNSCache creates a new DNS cache
-func NewDNSCache() *DNSCache {
-	return &DNSCache{
-		zones: make(map[string]*Zone),
+func NewDNSCache(metricsUpdateInterval time.Duration) *DNSCache {
+	cache := &DNSCache{
+		zones:                 make(map[string]*Zone),
+		metricsUpdateInterval: metricsUpdateInterval,
+		metricsStopCh:         make(chan struct{}),
+		metricsStoppedCh:      make(chan struct{}),
+	}
+
+	// Start the metrics update goroutine
+	go cache.metricsUpdateLoop()
+
+	return cache
+}
+
+// Stop stops the DNS cache and its background goroutines
+func (c *DNSCache) Stop() {
+	close(c.metricsStopCh)
+	<-c.metricsStoppedCh
+}
+
+// metricsUpdateLoop runs in a background goroutine to periodically update cache metrics
+func (c *DNSCache) metricsUpdateLoop() {
+	defer close(c.metricsStoppedCh)
+
+	if c.metricsUpdateInterval <= 0 {
+		// If interval is 0 or negative, don't run metrics updates
+		log.Debug("Metrics update interval disabled")
+		return
+	}
+
+	ticker := time.NewTicker(c.metricsUpdateInterval)
+	defer ticker.Stop()
+
+	// Initial update
+	c.updateCacheSizeMetricsUnlocked()
+
+	for {
+		select {
+		case <-c.metricsStopCh:
+			log.Debug("Stopping metrics update loop")
+			return
+		case <-ticker.C:
+			c.updateCacheSizeMetricsUnlocked()
+		}
 	}
 }
 
@@ -90,6 +135,7 @@ func (c *DNSCache) AddRecord(name string, qtype uint16, rr dns.RR) {
 	zone := c.ensureZoneUnlocked(zoneName)
 
 	zone.Lock()
+	defer zone.Unlock()
 
 	// Initialize domain records if needed
 	if zone.Records[name] == nil {
@@ -102,11 +148,6 @@ func (c *DNSCache) AddRecord(name string, qtype uint16, rr dns.RR) {
 
 	// Update zone serial
 	zone.Serial = uint32(time.Now().Unix())
-
-	zone.Unlock()
-
-	// Update cache size metric (while holding cache lock)
-	c.updateCacheSizeMetricsUnlocked()
 }
 
 // RemoveRecord removes a DNS record from the cache
@@ -123,9 +164,9 @@ func (c *DNSCache) RemoveRecord(name string, qtype uint16, target string) {
 	}
 
 	zone.Lock()
+	defer zone.Unlock()
 
 	if zone.Records[name] == nil {
-		zone.Unlock()
 		return
 	}
 
@@ -147,11 +188,6 @@ func (c *DNSCache) RemoveRecord(name string, qtype uint16, target string) {
 
 	// Update zone serial
 	zone.Serial = uint32(time.Now().Unix())
-
-	zone.Unlock()
-
-	// Update cache size metric
-	c.updateCacheSizeMetrics()
 }
 
 // GetRecords retrieves DNS records from the cache
@@ -194,13 +230,11 @@ func (c *DNSCache) ClearRecords(name string) {
 	}
 
 	zone.Lock()
+	defer zone.Unlock()
+
 	delete(zone.Records, name)
 	// Update zone serial
 	zone.Serial = uint32(time.Now().Unix())
-	zone.Unlock()
-
-	// Update cache size metric
-	c.updateCacheSizeMetrics()
 }
 
 // GetCacheSize returns the total number of records in the cache
@@ -221,15 +255,11 @@ func (c *DNSCache) GetCacheSize() int {
 	return total
 }
 
-// updateCacheSizeMetrics updates the cache size metrics
-func (c *DNSCache) updateCacheSizeMetrics() {
-	c.RLock()
-	defer c.RUnlock()
-	c.updateCacheSizeMetricsUnlocked()
-}
-
 // updateCacheSizeMetricsUnlocked updates the cache size metrics (assumes cache lock held)
 func (c *DNSCache) updateCacheSizeMetricsUnlocked() {
+	c.RLock()
+	defer c.RUnlock()
+
 	total := 0
 	for _, zone := range c.zones {
 		zone.RLock()
@@ -283,6 +313,7 @@ func getZoneName(name string) string {
 func (c *DNSCache) ensureZone(zoneName string) *Zone {
 	c.Lock()
 	defer c.Unlock()
+
 	return c.ensureZoneUnlocked(zoneName)
 }
 
@@ -547,9 +578,6 @@ func (e *ExternalDNS) Start() error {
 
 	// Start watching DNSEndpoint resources
 	go e.watchDNSEndpoints()
-
-	// Initialize cache size metric
-	e.cache.updateCacheSizeMetrics()
 
 	log.Info("ExternalDNS plugin started with service account authentication")
 	return nil

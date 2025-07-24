@@ -19,6 +19,10 @@
         
         # Default TTL for records (5 minutes)
         ttl 300
+        
+        # Metrics update interval (30 seconds is default)
+        # Use shorter intervals for more responsive metrics, longer for less overhead
+        metrics_interval 30s
     }
 
     # Enable zone transfers (AXFR) for slave DNS servers

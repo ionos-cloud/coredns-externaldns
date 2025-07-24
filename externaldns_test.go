@@ -3,12 +3,14 @@ package externaldns
 import (
 	"net"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
 func TestDNSCache(t *testing.T) {
-	cache := NewDNSCache()
+	cache := NewDNSCache(time.Minute)
+	defer cache.Stop() // Cleanup background goroutine
 
 	// Test adding and retrieving A records
 	aRecord := &dns.A{
@@ -163,9 +165,10 @@ func TestRecordMatches(t *testing.T) {
 
 func TestServeDNS(t *testing.T) {
 	ed := &ExternalDNS{
-		cache: NewDNSCache(),
+		cache: NewDNSCache(time.Minute),
 		ttl:   300,
 	}
+	defer ed.cache.Stop() // Cleanup background goroutine
 
 	// Add a test record to cache
 	aRecord := &dns.A{
@@ -203,7 +206,8 @@ func TestServeDNS(t *testing.T) {
 
 // TestCacheMetrics tests that cache size metrics are properly updated
 func TestCacheMetrics(t *testing.T) {
-	cache := NewDNSCache()
+	cache := NewDNSCache(time.Minute)
+	defer cache.Stop() // Cleanup background goroutine
 
 	// Initial cache should be empty
 	if cache.GetCacheSize() != 0 {
@@ -266,5 +270,33 @@ func TestCacheMetrics(t *testing.T) {
 	cache.ClearRecords("test2.example.com")
 	if cache.GetCacheSize() != 1 {
 		t.Errorf("Expected cache size 1 after clearing domain, got %d", cache.GetCacheSize())
+	}
+}
+
+// TestBackgroundMetricsUpdate tests that the background metrics update goroutine works
+func TestBackgroundMetricsUpdate(t *testing.T) {
+	// Use a short interval for testing
+	cache := NewDNSCache(100 * time.Millisecond)
+	defer cache.Stop() // Cleanup background goroutine
+
+	// Add a record
+	aRecord := &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   "test.example.com.",
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		A: net.ParseIP("192.168.1.1"),
+	}
+
+	cache.AddRecord("test.example.com.", dns.TypeA, aRecord)
+
+	// Wait for at least one metrics update cycle
+	time.Sleep(150 * time.Millisecond)
+
+	// Verify the cache has the record
+	if cache.GetCacheSize() != 1 {
+		t.Errorf("Expected cache size 1, got %d", cache.GetCacheSize())
 	}
 }

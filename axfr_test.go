@@ -9,7 +9,7 @@ import (
 
 func TestAXFRSupport(t *testing.T) {
 	e := &ExternalDNS{
-		cache: NewDNSCache(),
+		cache: NewDNSCache(time.Minute),
 		ttl:   300,
 	}
 
@@ -69,7 +69,7 @@ func TestAXFRSupport(t *testing.T) {
 }
 
 func TestZoneManagement(t *testing.T) {
-	cache := NewDNSCache()
+	cache := NewDNSCache(time.Minute)
 
 	// Test zone creation
 	zone := cache.ensureZone("example.com.")
@@ -136,7 +136,7 @@ func TestGetZoneName(t *testing.T) {
 }
 
 func TestRebuildZoneRecords(t *testing.T) {
-	cache := NewDNSCache()
+	cache := NewDNSCache(time.Minute)
 
 	// Add some records
 	aRecord := &dns.A{

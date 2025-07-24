@@ -2,6 +2,7 @@ package externaldns
 
 import (
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -48,7 +49,7 @@ func TestCreateReverseDNSName(t *testing.T) {
 
 func TestCreateAndAddPTRRecord(t *testing.T) {
 	e := &ExternalDNS{
-		cache: NewDNSCache(),
+		cache: NewDNSCache(time.Minute),
 	}
 
 	hostname := "test.example.com"
@@ -82,7 +83,7 @@ func TestCreateAndAddPTRRecord(t *testing.T) {
 
 func TestPTRRecordCreationForIPv6(t *testing.T) {
 	e := &ExternalDNS{
-		cache: NewDNSCache(),
+		cache: NewDNSCache(time.Minute),
 	}
 
 	hostname := "ipv6.example.com"

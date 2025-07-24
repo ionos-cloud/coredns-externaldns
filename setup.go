@@ -2,6 +2,7 @@ package externaldns
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
@@ -35,6 +36,9 @@ func setup(c *caddy.Controller) error {
 	// Register shutdown handler
 	c.OnShutdown(func() error {
 		ed.Stop()
+		if ed.cache != nil {
+			ed.cache.Stop()
+		}
 		return nil
 	})
 
@@ -44,8 +48,8 @@ func setup(c *caddy.Controller) error {
 // parseExternalDNS parses the plugin configuration
 func parseExternalDNS(c *caddy.Controller) (*ExternalDNS, error) {
 	ed := &ExternalDNS{
-		cache: NewDNSCache(),
-		ttl:   300, // Default TTL of 5 minutes
+		ttl:                   300,              // Default TTL of 5 minutes
+		metricsUpdateInterval: 30 * time.Second, // Default metrics update interval of 30 seconds
 	}
 
 	for c.Next() {
@@ -65,11 +69,23 @@ func parseExternalDNS(c *caddy.Controller) (*ExternalDNS, error) {
 					return nil, c.Errf("invalid TTL value: %s", c.Val())
 				}
 				ed.ttl = uint32(ttl)
+			case "metrics_interval":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				interval, err := time.ParseDuration(c.Val())
+				if err != nil {
+					return nil, c.Errf("invalid metrics interval value: %s", c.Val())
+				}
+				ed.metricsUpdateInterval = interval
 			default:
 				return nil, c.Errf("unknown property '%s'", c.Val())
 			}
 		}
 	}
+
+	// Create cache with the configured metrics interval
+	ed.cache = NewDNSCache(ed.metricsUpdateInterval)
 
 	return ed, nil
 }
