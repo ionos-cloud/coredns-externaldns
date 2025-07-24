@@ -19,9 +19,6 @@
         
         # Default TTL for records (5 minutes)
         ttl 300
-        
-        # Enable debug logging
-        debug
     }
 
     # Kubernetes plugin for cluster.local domains

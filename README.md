@@ -140,9 +140,6 @@ Use the provided `Corefile.standalone` as a starting point:
         
         # Optional: set default TTL in seconds (default: 300)
         ttl 300
-        
-        # Optional: enable debug logging
-        # debug
     }
     
     # Forward queries not handled by externaldns to upstream DNS
@@ -159,7 +156,6 @@ When using the plugin with existing CoreDNS, add the externaldns block to your C
     externaldns {
         namespace my-namespace          # Optional: watch specific namespace only
         ttl 300                        # Optional: default TTL in seconds (default: 300)
-        debug                          # Optional: enable debug logging
     }
     forward . 8.8.8.8
 }
@@ -169,9 +165,10 @@ When using the plugin with existing CoreDNS, add the externaldns block to your C
 
 - `namespace`: Kubernetes namespace to watch for DNSEndpoint resources. If not specified, watches all namespaces
 - `ttl`: Default TTL for DNS records in seconds (default: 300)
-- `debug`: Enable debug logging for troubleshooting
 
 **Note**: This plugin uses in-cluster service account authentication. Ensure proper RBAC permissions are configured.
+
+Debug logging is controlled by CoreDNS's built-in debug system. To enable debug logging, start CoreDNS with the `-debug` flag or add `debug` directive to your Corefile.
 
 ### Example DNSEndpoint CRD
 
@@ -438,13 +435,23 @@ Metrics are exposed on the standard CoreDNS metrics endpoint (typically `:9153/m
 
 ### Debug Logging
 
-Enable debug logging in the configuration:
+Debug logging is controlled by CoreDNS's built-in debug system. To enable debug logging, you can:
 
-```yaml
-externaldns {
-    debug
-}
-```
+1. **Start CoreDNS with debug flag**:
+   ```bash
+   ./coredns-externaldns -debug -conf Corefile
+   ```
+
+2. **Add debug directive to your Corefile**:
+   ```yaml
+   .:53 {
+       debug
+       externaldns {
+           namespace default
+       }
+       forward . 8.8.8.8
+   }
+   ```
 
 This will log:
 - DNSEndpoint events (CREATE, UPDATE, DELETE) 

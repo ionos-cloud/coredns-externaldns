@@ -165,7 +165,6 @@ func TestServeDNS(t *testing.T) {
 	ed := &ExternalDNS{
 		cache: NewDNSCache(),
 		ttl:   300,
-		debug: false,
 	}
 
 	// Add a test record to cache

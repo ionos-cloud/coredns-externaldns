@@ -1,6 +1,6 @@
 # Example Corefile for standalone CoreDNS with externaldns plugin
 .:53 {
-    # Enable debug logging (optional)
+    # Logging (use 'debug' instead of 'log' for debug output)
     log
     
     # Handle errors gracefully
@@ -19,9 +19,6 @@
         
         # Optional: set default TTL in seconds (default: 300)
         ttl 300
-        
-        # Optional: enable debug logging
-        # debug
     }
     
     # Forward queries not handled by externaldns to upstream DNS

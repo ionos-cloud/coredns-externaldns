@@ -49,7 +49,6 @@ func TestCreateReverseDNSName(t *testing.T) {
 func TestCreateAndAddPTRRecord(t *testing.T) {
 	e := &ExternalDNS{
 		cache: NewDNSCache(),
-		debug: true,
 	}
 
 	hostname := "test.example.com"
@@ -84,7 +83,6 @@ func TestCreateAndAddPTRRecord(t *testing.T) {
 func TestPTRRecordCreationForIPv6(t *testing.T) {
 	e := &ExternalDNS{
 		cache: NewDNSCache(),
-		debug: true,
 	}
 
 	hostname := "ipv6.example.com"

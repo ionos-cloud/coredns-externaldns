@@ -46,7 +46,6 @@ func parseExternalDNS(c *caddy.Controller) (*ExternalDNS, error) {
 	ed := &ExternalDNS{
 		cache: NewDNSCache(),
 		ttl:   300, // Default TTL of 5 minutes
-		debug: false,
 	}
 
 	for c.Next() {
@@ -66,8 +65,6 @@ func parseExternalDNS(c *caddy.Controller) (*ExternalDNS, error) {
 					return nil, c.Errf("invalid TTL value: %s", c.Val())
 				}
 				ed.ttl = uint32(ttl)
-			case "debug":
-				ed.debug = true
 			default:
 				return nil, c.Errf("unknown property '%s'", c.Val())
 			}

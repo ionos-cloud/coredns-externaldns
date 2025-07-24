@@ -32,7 +32,6 @@ type ExternalDNS struct {
 
 	namespace string
 	ttl       uint32
-	debug     bool
 
 	client dynamic.Interface
 	cache  *DNSCache
@@ -216,9 +215,7 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 	// Extract server info for metrics
 	server := metrics.WithServer(ctx)
 
-	if e.debug {
-		log.Debugf("Query for %s %s", qname, dns.TypeToString[qtype])
-	}
+	log.Debugf("Query for %s %s", qname, dns.TypeToString[qtype])
 
 	// Increment request counter
 	externalDNSRequestCount.WithLabelValues(server, "udp", dns.TypeToString[qtype]).Inc()
@@ -239,9 +236,7 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 	}
 
 	if len(records) == 0 {
-		if e.debug {
-			log.Debugf("No records found for %s %s", qname, dns.TypeToString[qtype])
-		}
+		log.Debugf("No records found for %s %s", qname, dns.TypeToString[qtype])
 		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 	}
 
@@ -254,9 +249,7 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 	// Add records to answer section
 	m.Answer = append(m.Answer, records...)
 
-	if e.debug {
-		log.Debugf("Returning %d records for %s %s", len(records), qname, dns.TypeToString[qtype])
-	}
+	log.Debugf("Returning %d records for %s %s", len(records), qname, dns.TypeToString[qtype])
 
 	w.WriteMsg(m)
 	return dns.RcodeSuccess, nil
@@ -366,10 +359,8 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 	// Increment endpoint event metric
 	externalDNSEndpointEvents.WithLabelValues("coredns", eventType).Inc()
 
-	if e.debug {
-		log.Debugf("Processing DNSEndpoint %s/%s (event: %s)",
-			obj.GetNamespace(), obj.GetName(), eventType)
-	}
+	log.Debugf("Processing DNSEndpoint %s/%s (event: %s)",
+		obj.GetNamespace(), obj.GetName(), eventType)
 
 	// Check for PTR record creation annotation
 	createPTR := false
@@ -606,9 +597,7 @@ func (e *ExternalDNS) createAndAddPTRRecord(hostname, ipAddr string, ttl uint32)
 
 	e.cache.AddRecord(ptrName, dns.TypePTR, ptrRecord)
 
-	if e.debug {
-		log.Debugf("Created PTR record: %s -> %s", ptrName, hostname)
-	}
+	log.Debugf("Created PTR record: %s -> %s", ptrName, hostname)
 }
 
 // createReverseDNSName creates a reverse DNS name from an IP address
