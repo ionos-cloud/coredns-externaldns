@@ -3,9 +3,12 @@ kind: DNSEndpoint
 metadata:
   name: example-app
   namespace: default
+  annotations:
+    # Enable automatic PTR record creation for A and AAAA records
+    coredns-externaldns.ionos.cloud/create-ptr: "true"
 spec:
   endpoints:
-  # A record for main application
+  # A record for main application (PTR records will be automatically created)
   - dnsName: app.example.com
     recordType: A
     recordTTL: 300
@@ -102,3 +105,36 @@ spec:
     targets:
     - 2001:db8::1
     - 2001:db8::2
+
+---
+# Example with automatic PTR record creation
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: server-with-ptr
+  namespace: default
+  annotations:
+    # This annotation enables automatic PTR record creation for A and AAAA records
+    coredns-externaldns.ionos.cloud/create-ptr: "true"
+spec:
+  endpoints:
+  # A record - will automatically create PTR record: 10.1.168.192.in-addr.arpa. -> server.example.com
+  - dnsName: server.example.com
+    recordType: A
+    recordTTL: 300
+    targets:
+    - 192.168.1.10
+  
+  # AAAA record - will automatically create PTR record: 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa. -> ipv6-server.example.com
+  - dnsName: ipv6-server.example.com
+    recordType: AAAA
+    recordTTL: 300
+    targets:
+    - 2001:db8::1
+  
+  # CNAME record - no PTR record will be created for this
+  - dnsName: alias.example.com
+    recordType: CNAME
+    recordTTL: 300
+    targets:
+    - server.example.com

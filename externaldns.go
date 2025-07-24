@@ -371,6 +371,14 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 			obj.GetNamespace(), obj.GetName(), eventType)
 	}
 
+	// Check for PTR record creation annotation
+	createPTR := false
+	if annotations := obj.GetAnnotations(); annotations != nil {
+		if val, exists := annotations["coredns-externaldns.ionos.cloud/create-ptr"]; exists {
+			createPTR = (val == "true" || val == "1")
+		}
+	}
+
 	// Extract endpoints from the object
 	endpoints, err := e.extractEndpoints(obj)
 	if err != nil {
@@ -386,11 +394,11 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 
 		// Add new records
 		for _, ep := range endpoints {
-			e.addEndpointToCache(ep)
+			e.addEndpointToCache(ep, createPTR)
 		}
 
-		log.Debugf("Updated cache with %d endpoints from %s/%s",
-			len(endpoints), obj.GetNamespace(), obj.GetName())
+		log.Debugf("Updated cache with %d endpoints from %s/%s (createPTR: %v)",
+			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR)
 
 	case "DELETED":
 		// Remove all records for this DNSEndpoint
@@ -449,7 +457,7 @@ func (e *ExternalDNS) extractEndpoints(obj *unstructured.Unstructured) ([]*endpo
 }
 
 // addEndpointToCache adds an endpoint to the DNS cache
-func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint) {
+func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool) {
 	if ep.DNSName == "" || len(ep.Targets) == 0 {
 		return
 	}
@@ -469,6 +477,11 @@ func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint) {
 		rr := e.createDNSRecord(ep.DNSName, qtype, ttl, target)
 		if rr != nil {
 			e.cache.AddRecord(ep.DNSName, qtype, rr)
+
+			// Create PTR records for A and AAAA records if annotation is present
+			if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
+				e.createAndAddPTRRecord(ep.DNSName, target, ttl)
+			}
 		}
 	}
 }
@@ -572,6 +585,61 @@ func (e *ExternalDNS) createDNSRecord(name string, qtype uint16, ttl uint32, tar
 	default:
 		return nil
 	}
+}
+
+// createAndAddPTRRecord creates and adds a PTR record for the given IP address
+func (e *ExternalDNS) createAndAddPTRRecord(hostname, ipAddr string, ttl uint32) {
+	ptrName := e.createReverseDNSName(ipAddr)
+	if ptrName == "" {
+		return
+	}
+
+	ptrRecord := &dns.PTR{
+		Hdr: dns.RR_Header{
+			Name:   ptrName,
+			Rrtype: dns.TypePTR,
+			Class:  dns.ClassINET,
+			Ttl:    ttl,
+		},
+		Ptr: dns.Fqdn(hostname),
+	}
+
+	e.cache.AddRecord(ptrName, dns.TypePTR, ptrRecord)
+
+	if e.debug {
+		log.Debugf("Created PTR record: %s -> %s", ptrName, hostname)
+	}
+}
+
+// createReverseDNSName creates a reverse DNS name from an IP address
+func (e *ExternalDNS) createReverseDNSName(ipAddr string) string {
+	ip := net.ParseIP(ipAddr)
+	if ip == nil {
+		log.Warningf("Invalid IP address for PTR record: %s", ipAddr)
+		return ""
+	}
+
+	if ip.To4() != nil {
+		// IPv4 reverse DNS
+		octets := strings.Split(ip.To4().String(), ".")
+		if len(octets) != 4 {
+			return ""
+		}
+		// Reverse the octets and append .in-addr.arpa.
+		return fmt.Sprintf("%s.%s.%s.%s.in-addr.arpa.", octets[3], octets[2], octets[1], octets[0])
+	} else if ip.To16() != nil {
+		// IPv6 reverse DNS
+		// Convert to full hex representation
+		ipv6 := ip.To16()
+		var nibbles []string
+		for i := 15; i >= 0; i-- {
+			nibbles = append(nibbles, fmt.Sprintf("%x", ipv6[i]&0x0f))
+			nibbles = append(nibbles, fmt.Sprintf("%x", (ipv6[i]&0xf0)>>4))
+		}
+		return strings.Join(nibbles, ".") + ".ip6.arpa."
+	}
+
+	return ""
 }
 
 // clearDNSEndpointRecords removes all records associated with a DNSEndpoint

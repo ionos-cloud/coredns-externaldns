@@ -13,6 +13,7 @@ This CoreDNS plugin integrates with external-dns by watching DNSEndpoint Custom 
   - TXT records
   - SRV records
   - PTR records
+- **Automatic PTR records**: Optionally creates reverse DNS (PTR) records for A and AAAA records when enabled via annotation
   - NS records
   - SOA records
 - **Wildcard support**: Supports wildcard DNS records for subdomain matching
@@ -202,6 +203,54 @@ spec:
     - "10 mail1.example.com"
     - "20 mail2.example.com"
 ```
+
+### Automatic PTR Record Creation
+
+The plugin supports automatic creation of PTR (reverse DNS) records for A and AAAA records when the DNSEndpoint has the appropriate annotation. This is useful for proper reverse DNS resolution.
+
+To enable automatic PTR record creation, add this annotation to your DNSEndpoint:
+
+```yaml
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: server-with-ptr
+  namespace: default
+  annotations:
+    # Enable automatic PTR record creation for A and AAAA records
+    coredns-externaldns.ionos.cloud/create-ptr: "true"
+spec:
+  endpoints:
+  # A record - will automatically create PTR record: 10.1.168.192.in-addr.arpa. -> server.example.com
+  - dnsName: server.example.com
+    recordType: A
+    recordTTL: 300
+    targets:
+    - 192.168.1.10
+  
+  # AAAA record - will automatically create PTR record in ip6.arpa domain
+  - dnsName: ipv6-server.example.com
+    recordType: AAAA
+    recordTTL: 300
+    targets:
+    - 2001:db8::1
+  
+  # CNAME and other record types are not affected
+  - dnsName: alias.example.com
+    recordType: CNAME
+    recordTTL: 300
+    targets:
+    - server.example.com
+```
+
+#### How PTR Records Work
+
+- **IPv4**: For A records, PTR records are created in the `in-addr.arpa.` domain
+  - Example: `192.168.1.10` → `10.1.168.192.in-addr.arpa. PTR server.example.com`
+- **IPv6**: For AAAA records, PTR records are created in the `ip6.arpa.` domain
+  - Example: `2001:db8::1` → `1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa. PTR ipv6-server.example.com`
+
+**Note**: Only A and AAAA record types will generate PTR records. Other record types (CNAME, MX, TXT, etc.) are not affected by this annotation.
 
 ## Development and Building
 
