@@ -13,14 +13,14 @@ var (
 		Subsystem: "externaldns",
 		Name:      "requests_total",
 		Help:      "Counter of DNS requests made to external-dns plugin.",
-	}, []string{"server", "proto", "type"})
+	}, []string{"server", "proto", "type", "zone"})
 
 	externalDNSCacheSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: plugin.Namespace,
 		Subsystem: "externaldns",
 		Name:      "cache_size",
 		Help:      "Number of entries in the DNS cache.",
-	}, []string{"server"})
+	}, []string{"server", "zone"})
 
 	externalDNSEndpointEvents = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: plugin.Namespace,

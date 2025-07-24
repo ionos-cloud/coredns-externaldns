@@ -260,19 +260,19 @@ func (c *DNSCache) updateCacheSizeMetricsUnlocked() {
 	c.RLock()
 	defer c.RUnlock()
 
-	total := 0
-	for _, zone := range c.zones {
+	for zoneName, zone := range c.zones {
 		zone.RLock()
+		total := 0
 		for _, types := range zone.Records {
 			for _, records := range types {
 				total += len(records)
 			}
 		}
 		zone.RUnlock()
-	}
 
-	// Update the gauge - using "coredns" as server label since we don't have server context here
-	externalDNSCacheSize.WithLabelValues("coredns").Set(float64(total))
+		// Update the gauge for each zone - using "coredns" as server label since we don't have server context here
+		externalDNSCacheSize.WithLabelValues("coredns", zoneName).Set(float64(total))
+	}
 }
 
 // recordMatches checks if a DNS record matches the target
@@ -418,7 +418,8 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 	}
 
 	// Increment request counter
-	externalDNSRequestCount.WithLabelValues(server, "udp", dns.TypeToString[qtype]).Inc()
+	zoneName := getZoneName(qname)
+	externalDNSRequestCount.WithLabelValues(server, "udp", dns.TypeToString[qtype], zoneName).Inc()
 
 	// Get records from cache
 	records := e.cache.GetRecords(qname, qtype)
@@ -658,9 +659,6 @@ func (e *ExternalDNS) watchDNSEndpoints() {
 
 // processDNSEndpoint processes a DNSEndpoint object
 func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventType string) {
-	// Increment endpoint event metric
-	externalDNSEndpointEvents.WithLabelValues("coredns", eventType).Inc()
-
 	log.Debugf("Processing DNSEndpoint %s/%s (event: %s)",
 		obj.GetNamespace(), obj.GetName(), eventType)
 
@@ -679,6 +677,9 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 			obj.GetNamespace(), obj.GetName(), err)
 		return
 	}
+
+	// Increment endpoint event metric
+	externalDNSEndpointEvents.WithLabelValues("coredns", eventType).Inc()
 
 	switch eventType {
 	case "ADDED", "MODIFIED":

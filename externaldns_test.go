@@ -300,3 +300,46 @@ func TestBackgroundMetricsUpdate(t *testing.T) {
 		t.Errorf("Expected cache size 1, got %d", cache.GetCacheSize())
 	}
 }
+
+// TestZoneMetrics tests that metrics include zone labels correctly
+func TestZoneMetrics(t *testing.T) {
+	// Use a short interval for testing
+	cache := NewDNSCache(100 * time.Millisecond)
+	defer cache.Stop() // Cleanup background goroutine
+
+	// Add records to different zones
+	aRecord1 := &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   "test.example.com.",
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		A: net.ParseIP("192.168.1.1"),
+	}
+
+	aRecord2 := &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   "api.different.org.",
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		A: net.ParseIP("192.168.1.2"),
+	}
+
+	cache.AddRecord("test.example.com.", dns.TypeA, aRecord1)
+	cache.AddRecord("api.different.org.", dns.TypeA, aRecord2)
+
+	// Wait for at least one metrics update cycle
+	time.Sleep(150 * time.Millisecond)
+
+	// Verify we have records in different zones
+	if cache.GetCacheSize() != 2 {
+		t.Errorf("Expected cache size 2, got %d", cache.GetCacheSize())
+	}
+
+	// The metrics should now be reported per-zone
+	// This test mainly verifies that the code runs without errors
+	// In a real environment, you could check Prometheus metrics registry
+}
