@@ -12,6 +12,7 @@ import (
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/metrics"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/coredns/coredns/plugin/transfer"
 	"github.com/miekg/dns"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,8 +42,18 @@ type ExternalDNS struct {
 
 // DNSCache holds DNS records in memory
 type DNSCache struct {
-	mu      sync.RWMutex
-	records map[string]map[uint16][]*dns.RR // domain -> qtype -> records
+	sync.RWMutex
+
+	zones map[string]*Zone // zone -> Zone info
+}
+
+// Zone represents a DNS zone
+type Zone struct {
+	sync.RWMutex
+
+	Name    string
+	Serial  uint32
+	Records map[string]map[uint16][]dns.RR // domain -> qtype -> records
 }
 
 // DNSRecord represents a DNS record with metadata
@@ -57,7 +68,7 @@ type DNSRecord struct {
 // NewDNSCache creates a new DNS cache
 func NewDNSCache() *DNSCache {
 	return &DNSCache{
-		records: make(map[string]map[uint16][]*dns.RR),
+		zones: make(map[string]*Zone),
 	}
 }
 
@@ -69,47 +80,75 @@ func getRecordName(name string) string {
 
 // AddRecord adds a DNS record to the cache
 func (c *DNSCache) AddRecord(name string, qtype uint16, rr dns.RR) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	name = getRecordName(name)
-	if c.records[name] == nil {
-		c.records[name] = make(map[uint16][]*dns.RR)
+	zoneName := getZoneName(name)
+
+	c.Lock()
+	defer c.Unlock()
+
+	// Ensure zone exists
+	zone := c.ensureZoneUnlocked(zoneName)
+
+	zone.Lock()
+
+	// Initialize domain records if needed
+	if zone.Records[name] == nil {
+		zone.Records[name] = make(map[uint16][]dns.RR)
 	}
 
-	c.records[name][qtype] = append(c.records[name][qtype], &rr)
+	zone.Records[name][qtype] = append(zone.Records[name][qtype], rr)
 
 	log.Debugf("Added record: %s %s -> %s", name, dns.TypeToString[qtype], rr.String())
 
-	// Update cache size metric
-	c.updateCacheSizeMetrics()
+	// Update zone serial
+	zone.Serial = uint32(time.Now().Unix())
+
+	zone.Unlock()
+
+	// Update cache size metric (while holding cache lock)
+	c.updateCacheSizeMetricsUnlocked()
 }
 
 // RemoveRecord removes a DNS record from the cache
 func (c *DNSCache) RemoveRecord(name string, qtype uint16, target string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	name = getRecordName(name)
-	if c.records[name] == nil {
+	zoneName := getZoneName(name)
+
+	c.RLock()
+	zone, exists := c.zones[zoneName]
+	c.RUnlock()
+
+	if !exists {
 		return
 	}
 
-	records := c.records[name][qtype]
+	zone.Lock()
+
+	if zone.Records[name] == nil {
+		zone.Unlock()
+		return
+	}
+
+	records := zone.Records[name][qtype]
 	for i, rr := range records {
-		if rr != nil && c.recordMatches(*rr, target) {
-			c.records[name][qtype] = append(records[:i], records[i+1:]...)
+		if c.recordMatches(rr, target) {
+			zone.Records[name][qtype] = append(records[:i], records[i+1:]...)
 			break
 		}
 	}
 
 	// Clean up empty entries
-	if len(c.records[name][qtype]) == 0 {
-		delete(c.records[name], qtype)
+	if len(zone.Records[name][qtype]) == 0 {
+		delete(zone.Records[name], qtype)
 	}
-	if len(c.records[name]) == 0 {
-		delete(c.records, name)
+	if len(zone.Records[name]) == 0 {
+		delete(zone.Records, name)
 	}
+
+	// Update zone serial
+	zone.Serial = uint32(time.Now().Unix())
+
+	zone.Unlock()
 
 	// Update cache size metric
 	c.updateCacheSizeMetrics()
@@ -117,18 +156,24 @@ func (c *DNSCache) RemoveRecord(name string, qtype uint16, target string) {
 
 // GetRecords retrieves DNS records from the cache
 func (c *DNSCache) GetRecords(name string, qtype uint16) []dns.RR {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	name = getRecordName(name)
-	if records, exists := c.records[name]; exists {
-		if rrs, typeExists := records[qtype]; typeExists {
-			result := make([]dns.RR, 0, len(rrs))
-			for _, rr := range rrs {
-				if rr != nil {
-					result = append(result, *rr)
-				}
-			}
+	zoneName := getZoneName(name)
+
+	c.RLock()
+	zone, exists := c.zones[zoneName]
+	c.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	zone.RLock()
+	defer zone.RUnlock()
+
+	if zone.Records[name] != nil {
+		if records, typeExists := zone.Records[name][qtype]; typeExists {
+			result := make([]dns.RR, len(records))
+			copy(result, records)
 			return result
 		}
 	}
@@ -137,11 +182,22 @@ func (c *DNSCache) GetRecords(name string, qtype uint16) []dns.RR {
 
 // ClearRecords clears all records for a domain
 func (c *DNSCache) ClearRecords(name string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	name = getRecordName(name)
-	delete(c.records, name)
+	zoneName := getZoneName(name)
+
+	c.RLock()
+	zone, exists := c.zones[zoneName]
+	c.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	zone.Lock()
+	delete(zone.Records, name)
+	// Update zone serial
+	zone.Serial = uint32(time.Now().Unix())
+	zone.Unlock()
 
 	// Update cache size metric
 	c.updateCacheSizeMetrics()
@@ -149,26 +205,40 @@ func (c *DNSCache) ClearRecords(name string) {
 
 // GetCacheSize returns the total number of records in the cache
 func (c *DNSCache) GetCacheSize() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.RLock()
+	defer c.RUnlock()
 
 	total := 0
-	for _, types := range c.records {
-		for _, records := range types {
-			total += len(records)
+	for _, zone := range c.zones {
+		zone.RLock()
+		for _, types := range zone.Records {
+			for _, records := range types {
+				total += len(records)
+			}
 		}
+		zone.RUnlock()
 	}
 	return total
 }
 
 // updateCacheSizeMetrics updates the cache size metrics
 func (c *DNSCache) updateCacheSizeMetrics() {
-	// This method is called from within locked sections, so we don't lock here
+	c.RLock()
+	defer c.RUnlock()
+	c.updateCacheSizeMetricsUnlocked()
+}
+
+// updateCacheSizeMetricsUnlocked updates the cache size metrics (assumes cache lock held)
+func (c *DNSCache) updateCacheSizeMetricsUnlocked() {
 	total := 0
-	for _, types := range c.records {
-		for _, records := range types {
-			total += len(records)
+	for _, zone := range c.zones {
+		zone.RLock()
+		for _, types := range zone.Records {
+			for _, records := range types {
+				total += len(records)
+			}
 		}
+		zone.RUnlock()
 	}
 
 	// Update the gauge - using "coredns" as server label since we don't have server context here
@@ -200,6 +270,99 @@ func (c *DNSCache) recordMatches(rr dns.RR, target string) bool {
 	return false
 }
 
+// getZoneName extracts the zone name from a domain name
+func getZoneName(name string) string {
+	parts := strings.Split(strings.TrimSuffix(name, "."), ".")
+	if len(parts) >= 2 {
+		return strings.Join(parts[len(parts)-2:], ".") + "."
+	}
+	return name
+}
+
+// ensureZone creates a zone if it doesn't exist
+func (c *DNSCache) ensureZone(zoneName string) *Zone {
+	c.Lock()
+	defer c.Unlock()
+	return c.ensureZoneUnlocked(zoneName)
+}
+
+// ensureZoneUnlocked creates a zone if it doesn't exist (assumes lock is held)
+func (c *DNSCache) ensureZoneUnlocked(zoneName string) *Zone {
+	if zone, exists := c.zones[zoneName]; exists {
+		return zone
+	}
+
+	zone := &Zone{
+		Name:    zoneName,
+		Serial:  uint32(time.Now().Unix()),
+		Records: make(map[string]map[uint16][]dns.RR),
+	}
+	c.zones[zoneName] = zone
+
+	log.Debugf("Created new zone: %s", zoneName)
+	return zone
+}
+
+// updateZoneSerial updates the serial number for a zone
+func (c *DNSCache) updateZoneSerial(zoneName string) {
+	c.RLock()
+	zone, exists := c.zones[zoneName]
+	c.RUnlock()
+
+	if exists && zone != nil {
+		zone.Lock()
+		zone.Serial = uint32(time.Now().Unix())
+		zone.Unlock()
+		log.Debugf("Updated serial for zone %s to %d", zoneName, zone.Serial)
+	}
+}
+
+// getZoneRecordsForAXFR gets all records for a zone in AXFR format
+func (c *DNSCache) getZoneRecordsForAXFR(zoneName string) []dns.RR {
+	c.RLock()
+	zone, exists := c.zones[zoneName]
+	c.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	zone.RLock()
+	defer zone.RUnlock()
+
+	var allRecords []dns.RR
+
+	// Add SOA record first
+	soaRecord := &dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   zoneName,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		Ns:      "ns1." + zoneName,
+		Mbox:    "admin." + zoneName,
+		Serial:  zone.Serial,
+		Refresh: 3600,
+		Retry:   1800,
+		Expire:  604800,
+		Minttl:  300,
+	}
+	allRecords = append(allRecords, soaRecord)
+
+	// Add all records for this zone
+	for domain, types := range zone.Records {
+		if strings.HasSuffix(domain, zoneName) || domain == strings.TrimSuffix(zoneName, ".") {
+			for _, records := range types {
+				allRecords = append(allRecords, records...)
+			}
+		}
+	}
+
+	log.Debugf("Zone %s has %d records for AXFR", zoneName, len(allRecords))
+	return allRecords
+}
+
 // ServeDNS implements the plugin.Handler interface
 func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	log.Info("Received DNS query")
@@ -216,6 +379,12 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 	server := metrics.WithServer(ctx)
 
 	log.Debugf("Query for %s %s", qname, dns.TypeToString[qtype])
+
+	// Handle AXFR requests
+	if qtype == dns.TypeAXFR {
+		log.Debugf("Handling AXFR request for zone: %s", qname)
+		return e.handleAXFR(w, r, qname)
+	}
 
 	// Increment request counter
 	externalDNSRequestCount.WithLabelValues(server, "udp", dns.TypeToString[qtype]).Inc()
@@ -257,6 +426,111 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
 // Name implements the plugin.Handler interface
 func (e *ExternalDNS) Name() string { return "externaldns" }
+
+// Transfer implements the transfer.Transfer interface for AXFR support
+func (e *ExternalDNS) Transfer(zone string, serial uint32) (<-chan []dns.RR, error) {
+	log.Debugf("AXFR requested for zone: %s, serial: %d", zone, serial)
+
+	zoneName := dns.Fqdn(zone)
+
+	// Ensure zone exists
+	e.cache.ensureZone(zoneName)
+
+	e.cache.RLock()
+	zoneInfo, exists := e.cache.zones[zoneName]
+	e.cache.RUnlock()
+
+	if !exists {
+		log.Debugf("Zone %s not found for AXFR", zoneName)
+		return nil, fmt.Errorf("zone %s not found", zoneName)
+	}
+
+	zoneInfo.RLock()
+	currentSerial := zoneInfo.Serial
+	zoneInfo.RUnlock()
+
+	// If the requested serial is the same or newer, no transfer needed
+	if serial >= currentSerial {
+		log.Debugf("No transfer needed for zone %s (current: %d, requested: %d)", zoneName, currentSerial, serial)
+		return nil, transfer.ErrNotAuthoritative
+	}
+
+	// Get all records for the zone
+	records := e.cache.getZoneRecordsForAXFR(zoneName)
+
+	// Create channel and send records
+	ch := make(chan []dns.RR, 1)
+
+	go func() {
+		defer close(ch)
+
+		log.Debugf("Sending AXFR for zone %s with %d records", zoneName, len(records))
+
+		// Send all records for the zone
+		if len(records) > 0 {
+			ch <- records
+		}
+	}()
+
+	return ch, nil
+}
+
+// Serial implements the transfer.Transfer interface
+func (e *ExternalDNS) Serial(zone string) uint32 {
+	zoneName := dns.Fqdn(zone)
+
+	e.cache.RLock()
+	zoneInfo, exists := e.cache.zones[zoneName]
+	e.cache.RUnlock()
+
+	if !exists {
+		// If zone doesn't exist, create it
+		zoneInfo = e.cache.ensureZone(zoneName)
+	}
+
+	zoneInfo.RLock()
+	serial := zoneInfo.Serial
+	zoneInfo.RUnlock()
+
+	log.Debugf("Serial for zone %s: %d", zoneName, serial)
+	return serial
+}
+
+// handleAXFR handles AXFR (zone transfer) requests
+func (e *ExternalDNS) handleAXFR(w dns.ResponseWriter, r *dns.Msg, zone string) (int, error) {
+	zoneName := dns.Fqdn(zone)
+
+	// Ensure zone exists
+	e.cache.ensureZone(zoneName)
+
+	e.cache.RLock()
+	_, exists := e.cache.zones[zoneName]
+	e.cache.RUnlock()
+
+	if !exists {
+		log.Debugf("Zone %s not found for AXFR", zoneName)
+		return dns.RcodeNotAuth, nil
+	}
+
+	// Get all records for the zone
+	records := e.cache.getZoneRecordsForAXFR(zoneName)
+
+	// Create AXFR response
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.Authoritative = true
+	m.Answer = records
+
+	log.Debugf("AXFR response for zone %s with %d records", zoneName, len(records))
+
+	err := w.WriteMsg(m)
+	if err != nil {
+		log.Errorf("Failed to write AXFR response: %v", err)
+		return dns.RcodeServerFailure, err
+	}
+
+	return dns.RcodeSuccess, nil
+}
 
 // Start starts watching DNSEndpoint resources
 func (e *ExternalDNS) Start() error {

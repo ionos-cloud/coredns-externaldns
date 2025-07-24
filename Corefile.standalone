@@ -21,6 +21,11 @@
         ttl 300
     }
     
+    # Optional: Enable zone transfers (AXFR) for slave DNS servers
+    # transfer {
+    #     to 192.168.1.0/24  # Restrict to trusted networks
+    # }
+    
     # Forward queries not handled by externaldns to upstream DNS
     forward . 8.8.8.8 8.8.4.4
 }

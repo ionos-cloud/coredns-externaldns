@@ -21,6 +21,11 @@
         ttl 300
     }
 
+    # Enable zone transfers (AXFR) for slave DNS servers
+    transfer {
+        to * # Allow transfers to any IP (restrict as needed for security)
+    }
+
     # Kubernetes plugin for cluster.local domains
     kubernetes cluster.local in-addr.arpa ip6.arpa {
         pods insecure

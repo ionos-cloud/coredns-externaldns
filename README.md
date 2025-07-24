@@ -14,6 +14,7 @@ This CoreDNS plugin integrates with external-dns by watching DNSEndpoint Custom 
   - SRV records
   - PTR records
 - **Automatic PTR records**: Optionally creates reverse DNS (PTR) records for A and AAAA records when enabled via annotation
+- **AXFR support**: Supports zone transfers (AXFR) for slave zone configurations
   - NS records
   - SOA records
 - **Wildcard support**: Supports wildcard DNS records for subdomain matching
@@ -248,6 +249,58 @@ spec:
   - Example: `2001:db8::1` → `1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa. PTR ipv6-server.example.com`
 
 **Note**: Only A and AAAA record types will generate PTR records. Other record types (CNAME, MX, TXT, etc.) are not affected by this annotation.
+
+### Zone Transfer (AXFR) Support
+
+The plugin supports AXFR (Authoritative Zone Transfer) for slave zone configurations. This allows secondary DNS servers to synchronize zone data from the CoreDNS instance running this plugin.
+
+#### How AXFR Works
+
+1. **Zone Management**: The plugin automatically organizes DNS records into zones based on domain names
+2. **Serial Numbers**: Each zone maintains a serial number that updates when records are added, modified, or removed
+3. **SOA Records**: Automatically generates SOA (Start of Authority) records for each zone
+4. **Transfer Protocol**: Supports standard DNS AXFR requests from slave servers
+
+#### Example Slave Zone Configuration
+
+To configure a slave zone that transfers from this CoreDNS instance:
+
+**On the slave DNS server** (e.g., BIND):
+```bind
+zone "example.com" {
+    type slave;
+    masters { 192.168.1.100; };  // IP of CoreDNS with externaldns plugin
+    file "slaves/example.com.zone";
+};
+```
+
+**On CoreDNS with externaldns plugin**, ensure your Corefile includes the `transfer` plugin:
+```yaml
+example.com:53 {
+    externaldns {
+        namespace default
+        ttl 300
+    }
+    
+    # Enable zone transfers
+    transfer {
+        to *  # Allow transfers to any IP (adjust as needed for security)
+    }
+}
+```
+
+#### AXFR Features
+
+- **Automatic Zone Detection**: Zones are automatically created based on DNS record domain names
+- **Real-time Updates**: Zone serials are updated immediately when DNSEndpoint resources change
+- **SOA Generation**: Automatically generates SOA records with appropriate serial numbers
+- **Multiple Zones**: Supports multiple zones simultaneously
+
+#### Security Considerations
+
+- Configure the `transfer` plugin to restrict AXFR access to authorized slave servers only
+- Use firewall rules to limit access to DNS port 53 from trusted networks
+- Consider using TSIG (Transaction Signatures) for authenticated transfers
 
 ## Development and Building
 

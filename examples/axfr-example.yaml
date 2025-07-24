@@ -1,0 +1,81 @@
+# Example DNSEndpoint for AXFR demonstration
+# This example shows how DNS records are organized into zones for AXFR
+
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: example-zone-records
+  namespace: default
+spec:
+  endpoints:
+  # Records for example.com zone
+  - dnsName: web.example.com
+    recordType: A
+    recordTTL: 300
+    targets:
+    - 192.168.1.10
+    - 192.168.1.11
+  
+  - dnsName: mail.example.com
+    recordType: A
+    recordTTL: 300
+    targets:
+    - 192.168.1.20
+  
+  - dnsName: example.com
+    recordType: MX
+    recordTTL: 300
+    targets:
+    - "10 mail.example.com"
+  
+  - dnsName: www.example.com
+    recordType: CNAME
+    recordTTL: 300
+    targets:
+    - web.example.com
+
+---
+# Example of another zone
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: test-zone-records
+  namespace: default
+spec:
+  endpoints:
+  # Records for test.com zone
+  - dnsName: api.test.com
+    recordType: A
+    recordTTL: 300
+    targets:
+    - 10.0.1.100
+  
+  - dnsName: db.test.com
+    recordType: A
+    recordTTL: 600
+    targets:
+    - 10.0.1.200
+  
+  - dnsName: test.com
+    recordType: TXT
+    recordTTL: 300
+    targets:
+    - "v=spf1 include:_spf.google.com ~all"
+
+---
+# AXFR Configuration Notes:
+#
+# When these DNSEndpoints are created, the plugin will:
+# 1. Organize records into zones: example.com and test.com
+# 2. Create SOA records for each zone with unique serial numbers
+# 3. Update serial numbers when records change
+# 4. Allow AXFR requests to transfer complete zone data
+#
+# To test AXFR:
+# dig @<coredns-ip> example.com AXFR
+# dig @<coredns-ip> test.com AXFR
+#
+# Each zone will include:
+# - SOA record (automatically generated)
+# - All A, CNAME, MX, TXT records for that zone
+# - Updated serial numbers when DNSEndpoints change
