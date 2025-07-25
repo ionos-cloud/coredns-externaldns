@@ -19,9 +19,8 @@ data:
 
         # External-DNS plugin for DNSEndpoint CRDs
         externaldns {
-            namespace ""        # Watch all namespaces, or specify a namespace
+            namespace ""       # Watch all namespaces, or specify a namespace
             ttl 300            # Default TTL
-            debug              # Enable debug logging
         }
         
         # Forward to upstream DNS

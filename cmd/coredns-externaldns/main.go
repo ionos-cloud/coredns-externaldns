@@ -17,18 +17,18 @@ import (
 
 func init() {
 	// Find etcd and insert externaldns plugin after it
-	inserted := false
 	for i, dir := range dnsserver.Directives {
 		if dir == "etcd" {
-			dnsserver.Directives = append(dnsserver.Directives[:i+1], "externaldns")
-			inserted = true
-			break
+			// Insert externaldns after etcd using slice insertion
+			dnsserver.Directives = append(
+				dnsserver.Directives[:i+1],
+				append([]string{"externaldns"}, dnsserver.Directives[i+1:]...)...,
+			)
+			return
 		}
 	}
 
-	if !inserted {
-		panic("etcd directive not found in CoreDNS directives")
-	}
+	panic("etcd directive not found in CoreDNS directives")
 }
 
 func main() {
