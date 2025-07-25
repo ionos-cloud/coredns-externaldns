@@ -72,7 +72,7 @@ func TestZoneManagement(t *testing.T) {
 	cache := NewDNSCache(time.Minute)
 
 	// Test zone creation
-	zone := cache.ensureZone("example.com.")
+	zone := cache.getOrCreateZone("example.com.")
 	if zone == nil {
 		t.Fatal("Failed to create zone")
 	}

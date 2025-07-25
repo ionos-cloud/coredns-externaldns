@@ -57,7 +57,7 @@ func TestCreateAndAddPTRRecord(t *testing.T) {
 	ttl := uint32(300)
 
 	// Create PTR record
-	e.createAndAddPTRRecord(hostname, ipAddr, ttl)
+	e.createAndAddPTRRecord(hostname, ipAddr, ttl, "test/endpoint")
 
 	// Verify PTR record was added to cache
 	ptrName := "10.1.168.192.in-addr.arpa."
@@ -91,7 +91,7 @@ func TestPTRRecordCreationForIPv6(t *testing.T) {
 	ttl := uint32(300)
 
 	// Create PTR record
-	e.createAndAddPTRRecord(hostname, ipAddr, ttl)
+	e.createAndAddPTRRecord(hostname, ipAddr, ttl, "test/ipv6-endpoint")
 
 	// Verify PTR record was added to cache
 	ptrName := "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."

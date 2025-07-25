@@ -41,11 +41,20 @@ type ExternalDNS struct {
 	cancel context.CancelFunc
 }
 
+// RecordRef represents a reference to a specific DNS record
+type RecordRef struct {
+	Zone   string
+	Name   string
+	Type   uint16
+	Target string
+}
+
 // DNSCache holds DNS records in memory
 type DNSCache struct {
 	sync.RWMutex
 
-	zones                 map[string]*Zone // zone -> Zone info
+	zones                 map[string]*Zone       // zone -> Zone info
+	endpointRecords       map[string][]RecordRef // namespace/name -> record references
 	metricsUpdateInterval time.Duration
 	metricsStopCh         chan struct{}
 	metricsStoppedCh      chan struct{}
@@ -73,6 +82,7 @@ type DNSRecord struct {
 func NewDNSCache(metricsUpdateInterval time.Duration) *DNSCache {
 	cache := &DNSCache{
 		zones:                 make(map[string]*Zone),
+		endpointRecords:       make(map[string][]RecordRef),
 		metricsUpdateInterval: metricsUpdateInterval,
 		metricsStopCh:         make(chan struct{}),
 		metricsStoppedCh:      make(chan struct{}),
@@ -123,6 +133,50 @@ func getRecordName(name string) string {
 	return dns.Fqdn(name)
 }
 
+// AddRecordWithEndpoint adds a DNS record to the cache and tracks its ownership
+func (c *DNSCache) AddRecordWithEndpoint(name string, qtype uint16, rr dns.RR, endpointKey, target string) {
+	name = getRecordName(name)
+	zoneName := getZoneName(name)
+
+	// Normalize target for certain record types that use FQDN
+	normalizedTarget := target
+	switch qtype {
+	case dns.TypeCNAME, dns.TypeMX, dns.TypeSRV, dns.TypePTR, dns.TypeNS:
+		// For these types, we need to store the FQDN version for proper matching
+		normalizedTarget = dns.Fqdn(target)
+	}
+
+	c.Lock()
+	defer c.Unlock()
+
+	// Ensure zone exists
+	zone := c.getOrCreateZoneUnlocked(zoneName)
+
+	zone.Lock()
+	defer zone.Unlock()
+
+	// Initialize domain records if needed
+	if zone.Records[name] == nil {
+		zone.Records[name] = make(map[uint16][]dns.RR)
+	}
+
+	zone.Records[name][qtype] = append(zone.Records[name][qtype], rr)
+
+	// Track record ownership using structured reference
+	recordRef := RecordRef{
+		Zone:   zoneName,
+		Name:   name,
+		Type:   qtype,
+		Target: normalizedTarget,
+	}
+	c.endpointRecords[endpointKey] = append(c.endpointRecords[endpointKey], recordRef)
+
+	log.Debugf("Added record: %s %s -> %s (endpoint: %s)", name, dns.TypeToString[qtype], rr.String(), endpointKey)
+
+	// Update zone serial
+	zone.Serial = uint32(time.Now().Unix())
+}
+
 // AddRecord adds a DNS record to the cache
 func (c *DNSCache) AddRecord(name string, qtype uint16, rr dns.RR) {
 	name = getRecordName(name)
@@ -132,7 +186,7 @@ func (c *DNSCache) AddRecord(name string, qtype uint16, rr dns.RR) {
 	defer c.Unlock()
 
 	// Ensure zone exists
-	zone := c.ensureZoneUnlocked(zoneName)
+	zone := c.getOrCreateZoneUnlocked(zoneName)
 
 	zone.Lock()
 	defer zone.Unlock()
@@ -188,6 +242,184 @@ func (c *DNSCache) RemoveRecord(name string, qtype uint16, target string) {
 
 	// Update zone serial
 	zone.Serial = uint32(time.Now().Unix())
+}
+
+// UpdateRecordsByEndpointWithAddition performs a differential update that ensures DNS availability
+// It adds new records first, then removes only obsolete ones
+func (c *DNSCache) UpdateRecordsByEndpointWithAddition(endpointKey string, newRecords []RecordRef, plugin *ExternalDNS, createPTR bool) {
+	c.Lock()
+	existingRecords, hasExisting := c.endpointRecords[endpointKey]
+	c.Unlock()
+
+	if !hasExisting {
+		// No existing records, add all new ones
+		for _, ref := range newRecords {
+			plugin.addRecordFromRef(ref, endpointKey)
+		}
+
+		c.Lock()
+		c.endpointRecords[endpointKey] = newRecords
+		c.Unlock()
+
+		return
+	}
+
+	// Create sets for efficient comparison
+	existingSet := make(map[RecordRef]bool)
+	for _, record := range existingRecords {
+		existingSet[record] = true
+	}
+
+	newSet := make(map[RecordRef]bool)
+	for _, record := range newRecords {
+		newSet[record] = true
+	}
+
+	// Find records to add (exist in new but not in old)
+	var toAdd []RecordRef
+	for _, record := range newRecords {
+		if !existingSet[record] {
+			toAdd = append(toAdd, record)
+		}
+	}
+
+	// Find records to remove (exist in old but not in new)
+	var toRemove []RecordRef
+	for _, record := range existingRecords {
+		if !newSet[record] {
+			toRemove = append(toRemove, record)
+		}
+	}
+
+	log.Debugf("Endpoint %s: adding %d new records, keeping %d unchanged records, removing %d old records",
+		endpointKey, len(toAdd), len(existingRecords)-len(toRemove), len(toRemove))
+
+	// CRITICAL: Add new records FIRST to ensure DNS availability
+	for _, ref := range toAdd {
+		plugin.addRecordFromRef(ref, endpointKey)
+	}
+
+	// Only after new records are added, remove the obsolete ones
+	c.removeSpecificRecords(toRemove)
+
+	// Update tracking with new records
+	c.Lock()
+	c.endpointRecords[endpointKey] = newRecords
+	c.Unlock()
+}
+
+// UpdateRecordsByEndpoint performs a differential update of records for a DNSEndpoint
+// This minimizes DNS downtime by only removing records that are no longer needed
+func (c *DNSCache) UpdateRecordsByEndpoint(endpointKey string, newRecords []RecordRef) {
+	c.Lock()
+	existingRecords, hasExisting := c.endpointRecords[endpointKey]
+	c.Unlock()
+
+	if !hasExisting {
+		// No existing records, just update tracking
+		c.Lock()
+		c.endpointRecords[endpointKey] = newRecords
+		c.Unlock()
+		return
+	}
+
+	// Create sets for efficient comparison
+	existingSet := make(map[RecordRef]bool)
+	for _, record := range existingRecords {
+		existingSet[record] = true
+	}
+
+	newSet := make(map[RecordRef]bool)
+	for _, record := range newRecords {
+		newSet[record] = true
+	}
+
+	// Find records to remove (exist in old but not in new)
+	var toRemove []RecordRef
+	for _, record := range existingRecords {
+		if !newSet[record] {
+			toRemove = append(toRemove, record)
+		}
+	}
+
+	log.Debugf("Endpoint %s: keeping %d unchanged records, removing %d old records",
+		endpointKey, len(existingRecords)-len(toRemove), len(toRemove))
+
+	// Remove only the records that are no longer needed
+	// New records are added through the normal AddRecordWithEndpoint flow
+	c.removeSpecificRecords(toRemove)
+
+	// Update tracking with new records
+	c.Lock()
+	c.endpointRecords[endpointKey] = newRecords
+	c.Unlock()
+}
+
+// RemoveRecordsByEndpoint removes all records associated with a specific DNSEndpoint (used for deletions)
+func (c *DNSCache) RemoveRecordsByEndpoint(endpointKey string) {
+	c.Lock()
+	recordRefs, exists := c.endpointRecords[endpointKey]
+	if !exists {
+		c.Unlock()
+		return
+	}
+
+	// Remove the endpoint tracking immediately to free memory
+	delete(c.endpointRecords, endpointKey)
+	c.Unlock()
+
+	log.Debugf("Removing %d records for endpoint %s", len(recordRefs), endpointKey)
+
+	// Remove all records
+	c.removeSpecificRecords(recordRefs)
+}
+
+// removeSpecificRecords removes only the specified records
+func (c *DNSCache) removeSpecificRecords(recordsToRemove []RecordRef) {
+	// Group records by zone to minimize lock operations
+	zoneGroups := make(map[string][]RecordRef)
+	for _, ref := range recordsToRemove {
+		zoneGroups[ref.Zone] = append(zoneGroups[ref.Zone], ref)
+	}
+
+	// Process each zone separately
+	for zoneName, refs := range zoneGroups {
+		c.RLock()
+		zone, exists := c.zones[zoneName]
+		c.RUnlock()
+
+		if !exists {
+			continue
+		}
+
+		zone.Lock()
+
+		// Remove specific records for this zone
+		for _, ref := range refs {
+			if zone.Records[ref.Name] != nil {
+				records := zone.Records[ref.Name][ref.Type]
+				for i, rr := range records {
+					if c.recordMatches(rr, ref.Target) {
+						zone.Records[ref.Name][ref.Type] = append(records[:i], records[i+1:]...)
+						log.Debugf("Removed record: %s %s -> %s", ref.Name, dns.TypeToString[ref.Type], ref.Target)
+						break
+					}
+				}
+
+				// Clean up empty entries
+				if len(zone.Records[ref.Name][ref.Type]) == 0 {
+					delete(zone.Records[ref.Name], ref.Type)
+				}
+				if len(zone.Records[ref.Name]) == 0 {
+					delete(zone.Records, ref.Name)
+				}
+			}
+		}
+
+		// Update zone serial once per zone
+		zone.Serial = uint32(time.Now().Unix())
+		zone.Unlock()
+	}
 }
 
 // GetRecords retrieves DNS records from the cache
@@ -309,16 +541,16 @@ func getZoneName(name string) string {
 	return name
 }
 
-// ensureZone creates a zone if it doesn't exist
-func (c *DNSCache) ensureZone(zoneName string) *Zone {
+// getOrCreateZone gets an existing zone or creates it if it doesn't exist
+func (c *DNSCache) getOrCreateZone(zoneName string) *Zone {
 	c.Lock()
 	defer c.Unlock()
 
-	return c.ensureZoneUnlocked(zoneName)
+	return c.getOrCreateZoneUnlocked(zoneName)
 }
 
-// ensureZoneUnlocked creates a zone if it doesn't exist (assumes lock is held)
-func (c *DNSCache) ensureZoneUnlocked(zoneName string) *Zone {
+// getOrCreateZoneUnlocked gets an existing zone or creates it if it doesn't exist (assumes lock is held)
+func (c *DNSCache) getOrCreateZoneUnlocked(zoneName string) *Zone {
 	if zone, exists := c.zones[zoneName]; exists {
 		return zone
 	}
@@ -466,7 +698,7 @@ func (e *ExternalDNS) Transfer(zone string, serial uint32) (<-chan []dns.RR, err
 	zoneName := dns.Fqdn(zone)
 
 	// Ensure zone exists
-	e.cache.ensureZone(zoneName)
+	e.cache.getOrCreateZone(zoneName)
 
 	e.cache.RLock()
 	zoneInfo, exists := e.cache.zones[zoneName]
@@ -517,7 +749,7 @@ func (e *ExternalDNS) Serial(zone string) uint32 {
 
 	if !exists {
 		// If zone doesn't exist, create it
-		zoneInfo = e.cache.ensureZone(zoneName)
+		zoneInfo = e.cache.getOrCreateZone(zoneName)
 	}
 
 	zoneInfo.RLock()
@@ -533,7 +765,7 @@ func (e *ExternalDNS) handleAXFR(w dns.ResponseWriter, r *dns.Msg, zone string) 
 	zoneName := dns.Fqdn(zone)
 
 	// Ensure zone exists
-	e.cache.ensureZone(zoneName)
+	e.cache.getOrCreateZone(zoneName)
 
 	e.cache.RLock()
 	_, exists := e.cache.zones[zoneName]
@@ -682,16 +914,35 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 	externalDNSEndpointEvents.WithLabelValues("coredns", eventType).Inc()
 
 	switch eventType {
-	case "ADDED", "MODIFIED":
-		// Clear existing records for this DNSEndpoint
-		e.clearDNSEndpointRecords(obj.GetNamespace(), obj.GetName())
+	case "ADDED":
+		endpointKey := fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName())
 
-		// Add new records
+		// For new endpoints, just add records normally
 		for _, ep := range endpoints {
-			e.addEndpointToCache(ep, createPTR)
+			e.addEndpointToCache(ep, createPTR, endpointKey)
 		}
 
-		log.Debugf("Updated cache with %d endpoints from %s/%s (createPTR: %v)",
+		log.Debugf("Added cache with %d endpoints from %s/%s (createPTR: %v)",
+			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR)
+
+	case "MODIFIED":
+		endpointKey := fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName())
+
+		// For modifications, we need to be careful about DNS availability
+		// First collect what records SHOULD exist (without adding them yet)
+		var newRecordRefs []RecordRef
+		for _, ep := range endpoints {
+			refs := e.collectRecordRefs(ep, createPTR, endpointKey)
+			newRecordRefs = append(newRecordRefs, refs...)
+		}
+
+		// Now perform the differential update which:
+		// 1. Adds any new records that don't exist
+		// 2. Removes only records that are no longer needed
+		// 3. Keeps unchanged records untouched
+		e.cache.UpdateRecordsByEndpointWithAddition(endpointKey, newRecordRefs, e, createPTR)
+
+		log.Debugf("Modified cache with %d endpoints from %s/%s (createPTR: %v)",
 			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR)
 
 	case "DELETED":
@@ -751,7 +1002,7 @@ func (e *ExternalDNS) extractEndpoints(obj *unstructured.Unstructured) ([]*endpo
 }
 
 // addEndpointToCache adds an endpoint to the DNS cache
-func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool) {
+func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool, endpointKey string) {
 	if ep.DNSName == "" || len(ep.Targets) == 0 {
 		return
 	}
@@ -770,14 +1021,188 @@ func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool) 
 	for _, target := range ep.Targets {
 		rr := e.createDNSRecord(ep.DNSName, qtype, ttl, target)
 		if rr != nil {
-			e.cache.AddRecord(ep.DNSName, qtype, rr)
+			e.cache.AddRecordWithEndpoint(ep.DNSName, qtype, rr, endpointKey, target)
 
 			// Create PTR records for A and AAAA records if annotation is present
 			if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
-				e.createAndAddPTRRecord(ep.DNSName, target, ttl)
+				e.createAndAddPTRRecord(ep.DNSName, target, ttl, endpointKey)
 			}
 		}
 	}
+}
+
+// collectRecordRefs collects RecordRef references for an endpoint without adding to cache
+func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool, endpointKey string) []RecordRef {
+	refs := make([]RecordRef, 0)
+
+	// Handle main record
+	dnsName := dns.Fqdn(ep.DNSName)
+
+	switch ep.RecordType {
+	case "A":
+		for _, target := range ep.Targets {
+			ip := net.ParseIP(target)
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			refs = append(refs, RecordRef{
+				Zone:   getZoneName(getRecordName(ep.DNSName)),
+				Name:   dnsName,
+				Type:   dns.TypeA,
+				Target: target,
+			})
+		}
+	case "AAAA":
+		for _, target := range ep.Targets {
+			ip := net.ParseIP(target)
+			if ip == nil || ip.To4() != nil {
+				continue
+			}
+			refs = append(refs, RecordRef{
+				Zone:   getZoneName(getRecordName(ep.DNSName)),
+				Name:   dnsName,
+				Type:   dns.TypeAAAA,
+				Target: target,
+			})
+		}
+	case "CNAME":
+		if len(ep.Targets) > 0 {
+			refs = append(refs, RecordRef{
+				Zone:   getZoneName(getRecordName(ep.DNSName)),
+				Name:   dnsName,
+				Type:   dns.TypeCNAME,
+				Target: dns.Fqdn(ep.Targets[0]),
+			})
+		}
+	}
+
+	// Handle PTR records if enabled
+	if createPTR && ep.RecordType != "PTR" {
+		for _, target := range ep.Targets {
+			ip := net.ParseIP(target)
+			if ip == nil {
+				continue
+			}
+
+			var ptrName string
+			if ip.To4() != nil {
+				// IPv4
+				ptrName, _ = dns.ReverseAddr(ip.String())
+			} else {
+				// IPv6
+				ptrName, _ = dns.ReverseAddr(ip.String())
+			}
+
+			refs = append(refs, RecordRef{
+				Zone:   getZoneName(ptrName),
+				Name:   ptrName,
+				Type:   dns.TypePTR,
+				Target: dnsName,
+			})
+		}
+	}
+
+	return refs
+}
+
+// addRecordFromRef adds a single record to the cache based on a RecordRef
+func (e *ExternalDNS) addRecordFromRef(ref RecordRef, endpointKey string) {
+	// Create the DNS record
+	rr := e.createDNSRecordFromRef(ref)
+	if rr != nil {
+		e.cache.AddRecordWithEndpoint(ref.Name, ref.Type, rr, endpointKey, ref.Target)
+	}
+}
+
+// createDNSRecordFromRef creates a DNS record from a RecordRef
+func (e *ExternalDNS) createDNSRecordFromRef(ref RecordRef) dns.RR {
+	header := dns.RR_Header{
+		Name:   ref.Name,
+		Rrtype: ref.Type,
+		Class:  dns.ClassINET,
+		Ttl:    e.ttl,
+	}
+
+	switch ref.Type {
+	case dns.TypeA:
+		return &dns.A{
+			Hdr: header,
+			A:   net.ParseIP(ref.Target),
+		}
+	case dns.TypeAAAA:
+		return &dns.AAAA{
+			Hdr:  header,
+			AAAA: net.ParseIP(ref.Target),
+		}
+	case dns.TypeCNAME:
+		return &dns.CNAME{
+			Hdr:    header,
+			Target: ref.Target,
+		}
+	case dns.TypePTR:
+		return &dns.PTR{
+			Hdr: header,
+			Ptr: ref.Target,
+		}
+	case dns.TypeNS:
+		return &dns.NS{
+			Hdr: header,
+			Ns:  ref.Target,
+		}
+	default:
+		log.Warningf("Unsupported record type in ref: %s", dns.TypeToString[ref.Type])
+		return nil
+	}
+}
+
+// addEndpointToCacheAndCollectRefs adds records and returns their references for tracking
+func (e *ExternalDNS) addEndpointToCacheAndCollectRefs(ep *endpoint.Endpoint, createPTR bool, endpointKey string) []RecordRef {
+	var refs []RecordRef
+
+	if ep.DNSName == "" || len(ep.Targets) == 0 {
+		return refs
+	}
+
+	qtype := e.recordTypeToQType(ep.RecordType)
+	if qtype == 0 {
+		log.Warningf("Unsupported record type: %s", ep.RecordType)
+		return refs
+	}
+
+	ttl := e.ttl
+	if ep.RecordTTL > 0 {
+		ttl = uint32(ep.RecordTTL)
+	}
+
+	for _, target := range ep.Targets {
+		rr := e.createDNSRecord(ep.DNSName, qtype, ttl, target)
+		if rr != nil {
+			e.cache.AddRecordWithEndpoint(ep.DNSName, qtype, rr, endpointKey, target)
+
+			// Add reference for the main record
+			normalizedTarget := target
+			switch qtype {
+			case dns.TypeCNAME, dns.TypeMX, dns.TypeSRV, dns.TypePTR, dns.TypeNS:
+				normalizedTarget = dns.Fqdn(target)
+			}
+
+			ref := RecordRef{
+				Zone:   getZoneName(getRecordName(ep.DNSName)),
+				Name:   getRecordName(ep.DNSName),
+				Type:   qtype,
+				Target: normalizedTarget,
+			}
+			refs = append(refs, ref)
+
+			// Create PTR records for A and AAAA records if annotation is present
+			if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
+				ptrRefs := e.createAndAddPTRRecordWithRefs(ep.DNSName, target, ttl, endpointKey)
+				refs = append(refs, ptrRefs...)
+			}
+		}
+	}
+
+	return refs
 }
 
 // recordTypeToQType converts string record type to DNS qtype
@@ -882,7 +1307,7 @@ func (e *ExternalDNS) createDNSRecord(name string, qtype uint16, ttl uint32, tar
 }
 
 // createAndAddPTRRecord creates and adds a PTR record for the given IP address
-func (e *ExternalDNS) createAndAddPTRRecord(hostname, ipAddr string, ttl uint32) {
+func (e *ExternalDNS) createAndAddPTRRecord(hostname, ipAddr string, ttl uint32, endpointKey string) {
 	ptrName := e.createReverseDNSName(ipAddr)
 	if ptrName == "" {
 		return
@@ -898,9 +1323,44 @@ func (e *ExternalDNS) createAndAddPTRRecord(hostname, ipAddr string, ttl uint32)
 		Ptr: dns.Fqdn(hostname),
 	}
 
-	e.cache.AddRecord(ptrName, dns.TypePTR, ptrRecord)
+	e.cache.AddRecordWithEndpoint(ptrName, dns.TypePTR, ptrRecord, endpointKey, dns.Fqdn(hostname))
 
 	log.Debugf("Created PTR record: %s -> %s", ptrName, hostname)
+}
+
+// createAndAddPTRRecordWithRefs creates PTR record and returns its reference
+func (e *ExternalDNS) createAndAddPTRRecordWithRefs(hostname, ipAddr string, ttl uint32, endpointKey string) []RecordRef {
+	var refs []RecordRef
+
+	ptrName := e.createReverseDNSName(ipAddr)
+	if ptrName == "" {
+		return refs
+	}
+
+	ptrRecord := &dns.PTR{
+		Hdr: dns.RR_Header{
+			Name:   ptrName,
+			Rrtype: dns.TypePTR,
+			Class:  dns.ClassINET,
+			Ttl:    ttl,
+		},
+		Ptr: dns.Fqdn(hostname),
+	}
+
+	normalizedPtrName := getRecordName(ptrName)
+	e.cache.AddRecordWithEndpoint(ptrName, dns.TypePTR, ptrRecord, endpointKey, dns.Fqdn(hostname))
+
+	// Add reference for the PTR record
+	ref := RecordRef{
+		Zone:   getZoneName(normalizedPtrName),
+		Name:   normalizedPtrName,
+		Type:   dns.TypePTR,
+		Target: dns.Fqdn(hostname),
+	}
+	refs = append(refs, ref)
+
+	log.Debugf("Created PTR record: %s -> %s", ptrName, hostname)
+	return refs
 }
 
 // createReverseDNSName creates a reverse DNS name from an IP address
@@ -936,8 +1396,7 @@ func (e *ExternalDNS) createReverseDNSName(ipAddr string) string {
 
 // clearDNSEndpointRecords removes all records associated with a DNSEndpoint
 func (e *ExternalDNS) clearDNSEndpointRecords(namespace, name string) {
-	// In a real implementation, you might want to track which records
-	// belong to which DNSEndpoint for more precise cleanup
-	// For now, this is a simplified approach
-	log.Debugf("Clearing records for DNSEndpoint %s/%s", namespace, name)
+	endpointKey := fmt.Sprintf("%s/%s", namespace, name)
+	e.cache.RemoveRecordsByEndpoint(endpointKey)
+	log.Debugf("Cleared records for DNSEndpoint %s", endpointKey)
 }
