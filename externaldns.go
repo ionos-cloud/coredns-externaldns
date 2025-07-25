@@ -937,7 +937,7 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 		// First collect what records SHOULD exist (without adding them yet)
 		var newRecordRefs []RecordRef
 		for _, ep := range endpoints {
-			refs := e.collectRecordRefs(ep, createPTR, endpointKey)
+			refs := e.collectRecordRefs(ep, createPTR)
 			newRecordRefs = append(newRecordRefs, refs...)
 		}
 
@@ -1037,7 +1037,7 @@ func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool, 
 }
 
 // collectRecordRefs collects RecordRef references for an endpoint without adding to cache
-func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool, endpointKey string) []RecordRef {
+func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) []RecordRef {
 	refs := make([]RecordRef, 0)
 
 	// Handle main record

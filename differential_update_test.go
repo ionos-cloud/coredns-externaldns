@@ -38,8 +38,8 @@ func TestDifferentialUpdate(t *testing.T) {
 
 	// Track the initial records manually (this simulates what processDNSEndpoint does for ADDED)
 	initialRefs := make([]RecordRef, 0)
-	initialRefs = append(initialRefs, e.collectRecordRefs(ep1, false, endpointKey)...)
-	initialRefs = append(initialRefs, e.collectRecordRefs(ep2, false, endpointKey)...)
+	initialRefs = append(initialRefs, e.collectRecordRefs(ep1, false)...)
+	initialRefs = append(initialRefs, e.collectRecordRefs(ep2, false)...)
 	e.cache.Lock()
 	e.cache.endpointRecords[endpointKey] = initialRefs
 	e.cache.Unlock()
@@ -73,8 +73,8 @@ func TestDifferentialUpdate(t *testing.T) {
 
 	// Now simulate the proper MODIFIED flow: collect what should exist, then update
 	newRefs := make([]RecordRef, 0)
-	newRefs = append(newRefs, e.collectRecordRefs(modifiedEp1, false, endpointKey)...)
-	newRefs = append(newRefs, e.collectRecordRefs(newEp, false, endpointKey)...)
+	newRefs = append(newRefs, e.collectRecordRefs(modifiedEp1, false)...)
+	newRefs = append(newRefs, e.collectRecordRefs(newEp, false)...)
 
 	// Use the new method that ensures DNS availability during updates
 	e.cache.UpdateRecordsByEndpointWithAddition(endpointKey, newRefs, e, false)
