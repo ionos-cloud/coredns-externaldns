@@ -684,7 +684,12 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
 	log.Debugf("Returning %d records for %s %s", len(records), qname, dns.TypeToString[qtype])
 
-	w.WriteMsg(m)
+	err := w.WriteMsg(m)
+	if err != nil {
+		log.Errorf("Failed to write DNS response: %v", err)
+		return dns.RcodeServerFailure, err
+	}
+
 	return dns.RcodeSuccess, nil
 }
 
@@ -1263,7 +1268,10 @@ func (e *ExternalDNS) createDNSRecord(name string, qtype uint16, ttl uint32, tar
 			return nil
 		}
 		var priority uint16
-		fmt.Sscanf(parts[0], "%d", &priority)
+		if _, err := fmt.Sscanf(parts[0], "%d", &priority); err != nil {
+			log.Warningf("Invalid MX priority '%s': %v", parts[0], err)
+			return nil
+		}
 		return &dns.MX{
 			Hdr:        header,
 			Preference: priority,
@@ -1281,9 +1289,18 @@ func (e *ExternalDNS) createDNSRecord(name string, qtype uint16, ttl uint32, tar
 			return nil
 		}
 		var priority, weight, port uint16
-		fmt.Sscanf(parts[0], "%d", &priority)
-		fmt.Sscanf(parts[1], "%d", &weight)
-		fmt.Sscanf(parts[2], "%d", &port)
+		if _, err := fmt.Sscanf(parts[0], "%d", &priority); err != nil {
+			log.Warningf("Invalid SRV priority '%s': %v", parts[0], err)
+			return nil
+		}
+		if _, err := fmt.Sscanf(parts[1], "%d", &weight); err != nil {
+			log.Warningf("Invalid SRV weight '%s': %v", parts[1], err)
+			return nil
+		}
+		if _, err := fmt.Sscanf(parts[2], "%d", &port); err != nil {
+			log.Warningf("Invalid SRV port '%s': %v", parts[2], err)
+			return nil
+		}
 		return &dns.SRV{
 			Hdr:      header,
 			Priority: priority,
