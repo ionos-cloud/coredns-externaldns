@@ -21,7 +21,6 @@ This CoreDNS plugin integrates with external-dns by watching DNSEndpoint Custom 
 - **Kubernetes native**: Uses Kubernetes client-go for efficient CRD watching
 - **Configurable**: Supports namespace filtering, custom TTLs, and debug logging
 - **High performance**: In-memory cache provides fast DNS query responses
-- **Comprehensive plugin support**: Standalone version includes 45+ CoreDNS plugins for maximum functionality
 - **Production-ready**: Docker containers with multi-stage builds for optimal size and security
 
 ## Installation
@@ -94,29 +93,9 @@ This method is recommended because:
 
 | Feature | Plugin Integration | Standalone |
 |---------|-------------------|------------|
-| **Setup Complexity** | High (rebuild CoreDNS) | Low (ready to run) |
-| **Binary Size** | Smaller (plugin only) | Larger (full CoreDNS) |
 | **Deployment** | Requires CoreDNS rebuild | Single binary |
 | **Plugin Management** | Manual plugin.cfg editing | Pre-configured |
-| **Recommended For** | Existing CoreDNS setups | New deployments |
 | **Build Command** | `make build-plugin` | `make build-standalone` |
-
-### Included Plugins (Standalone)
-
-The standalone version includes 45 CoreDNS plugins providing comprehensive DNS functionality:
-
-**Core DNS Features**: acl, any, auto, autopath, bind, bufsize, cache, cancel, chaos, debug, dns64, dnssec, dnstap, erratic, errors, etcd, file, forward, geoip, grpc, header, health, hosts, loadbalance, local, log, loop, metadata, minimal, nsid, pprof, ready, reload, rewrite, root, secondary, template, tls, trace, transfer, tsig, whoami
-
-**Additional Features**: 
-- **externaldns**: Our custom plugin for ExternalDNS CRD integration
-- **prometheus**: Metrics collection and monitoring
-
-**Excluded Plugins**: Some plugins are excluded due to CoreDNS v1.12.2 compatibility or dependency conflicts: `on`, `quic`, `timeouts`, `multisocket`, `sign`, `view`, cloud providers (`azure`, `clouddns`, `route53`), and kubernetes plugins.
-
-To see all available plugins in your build:
-```bash
-./coredns-externaldns -plugins
-```
 
 For detailed integration instructions, see [INTEGRATION.md](INTEGRATION.md).
 
