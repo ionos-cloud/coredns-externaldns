@@ -88,7 +88,7 @@ run-local:
 
 # Apply Kubernetes manifests
 k8s-apply:
-	kubectl apply -f k8s-deployment.yaml
+	kubectl apply -f deploy/k8s-deployment.yaml
 
 # Apply example DNSEndpoints
 examples-apply:
@@ -96,7 +96,7 @@ examples-apply:
 
 # Remove Kubernetes manifests
 k8s-delete:
-	kubectl delete -f k8s-deployment.yaml
+	kubectl delete -f deploy/k8s-deployment.yaml
 
 # Remove example DNSEndpoints
 examples-delete:

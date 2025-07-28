@@ -91,13 +91,41 @@ This method is recommended because:
 
 ### Integration Methods Comparison
 
-| Feature | Plugin Integration | Standalone |
-|---------|-------------------|------------|
-| **Deployment** | Requires CoreDNS rebuild | Single binary |
-| **Plugin Management** | Manual plugin.cfg editing | Pre-configured |
-| **Build Command** | `make build-plugin` | `make build-standalone` |
+| Feature | Plugin Integration | Standalone | Helm Chart |
+|---------|-------------------|------------|------------|
+| **Deployment** | Requires CoreDNS rebuild | Single binary | helm install |
+| **Plugin Management** | Manual plugin.cfg editing | Pre-configured | Managed via chart |
+| **Build Command** | `make build-plugin` | `make build-standalone` | N/A |
+| **RBAC Setup** | Manual | Manual | Automated |
+| **CRD Creation** | Manual | Manual | Automated |
+| **Kubernetes Integration** | Custom manifests | Custom manifests | Native Helm |
+| **Best For** | Existing CoreDNS | Simple setups | Production K8s |
 
 For detailed integration instructions, see [INTEGRATION.md](INTEGRATION.md).
+
+### Method 3: Helm Chart (Kubernetes)
+
+The easiest way to deploy in Kubernetes is using the official Helm chart:
+
+```bash
+# Install with default configuration
+helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns
+
+# Install specific version
+helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns --version 1.0.0
+
+# Install with custom configuration
+helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns -f values.yaml
+```
+
+The Helm chart provides:
+- **Automated CRD creation**: DNSEndpoint CRDs are created automatically
+- **RBAC configuration**: Proper service accounts and permissions
+- **CoreDNS integration**: Uses official CoreDNS chart as dependency
+- **OCI registry**: Published to GitHub Container Registry
+- **Production ready**: Includes best practices for Kubernetes deployment
+
+For complete Helm chart documentation, see [deploy/charts/coredns-externaldns/README.md](deploy/charts/coredns-externaldns/README.md).
 
 ## Configuration
 
@@ -345,6 +373,28 @@ docker build -t coredns-externaldns-standalone .
 docker run --rm -p 5353:53/udp coredns-externaldns-standalone:latest
 ```
 
+### Kubernetes Deployment
+
+For Kubernetes deployments, all assets are organized in the `deploy/` directory:
+
+```bash
+# Helm chart deployment (recommended)
+helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns
+
+# Raw Kubernetes manifests
+kubectl apply -f deploy/k8s-deployment.yaml
+
+# Using Makefile
+make k8s-apply
+```
+
+The `deploy/` directory contains:
+- **Helm chart**: Production-ready with RBAC, CRD creation, and configuration options
+- **Raw manifests**: Simple Kubernetes deployment for testing/development
+- **Documentation**: Complete deployment guides and examples
+
+For detailed deployment instructions, see [deploy/README.md](deploy/README.md).
+
 ## Supported Record Types
 
 ### A Records
@@ -498,16 +548,7 @@ This will log:
 - **Concurrent Safe**: All cache operations are protected by read-write mutexes
 - **Graceful Restart**: Handles watch connection failures with automatic retry
 
-## Troubleshooting
-
-### Common Issues
-
-1. **Plugin not loading**: Ensure the plugin is properly registered in CoreDNS plugin.cfg
-2. **No records found**: Check that DNSEndpoint CRDs exist and are in the correct namespace
-3. **Permission denied**: Ensure CoreDNS service account has proper RBAC permissions to watch DNSEndpoint resources
-4. **Authentication errors**: Verify the service account token is properly mounted and has the required permissions
-
-### Required RBAC Permissions
+## Required RBAC Permissions
 
 The plugin requires a service account with the following RBAC permissions:
 
@@ -535,7 +576,7 @@ subjects:
   namespace: kube-system
 ```
 
-### Service Account Configuration
+## Service Account Configuration
 
 Ensure your CoreDNS deployment uses the service account with proper permissions:
 

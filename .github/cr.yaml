@@ -1,0 +1,18 @@
+# Chart Releaser configuration
+owner: ionos-cloud
+git-repo: coredns-externaldns
+charts-repo: https://ionos-cloud.github.io/coredns-externaldns
+skip-packaging: false
+skip-upload: false
+skip-existing: true
+release-name-template: "{{ .Name }}-{{ .Version }}"
+make-release-latest: true
+packages-with-index: true
+push-pages-branch: gh-pages
+remote: origin
+commit-username: ""
+commit-email: ""
+index-path: "."
+package-path: ".cr-release-packages"
+pages-branch: gh-pages
+pages-index-path: "index.yaml"

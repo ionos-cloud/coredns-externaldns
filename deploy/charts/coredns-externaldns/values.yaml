@@ -1,0 +1,26 @@
+# CoreDNS configuration with external-dns plugin
+coredns:
+  # Override the default CoreDNS image to use one with external-dns plugin
+  image:
+    repository: ghcr.io/ionos-cloud/coredns-externaldns
+    tag: ""
+    pullPolicy: IfNotPresent
+
+# DNSEndpoint Custom Resource Definition configuration
+dnsendpoint:
+  # Create DNSEndpoint CRD
+  createCRD: true
+
+# RBAC configuration for external-dns plugin
+rbac:
+  # Create RBAC resources
+  create: true
+  
+  # Service account name
+  serviceAccountName: coredns-externaldns
+  
+  # Additional labels for RBAC resources
+  labels: {}
+  
+  # Additional annotations for RBAC resources
+  annotations: {}

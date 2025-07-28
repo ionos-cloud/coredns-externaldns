@@ -1,0 +1,33 @@
+1. Get the CoreDNS service IP:
+   kubectl get service {{ .Release.Name }}-coredns -n {{ .Release.Namespace }}
+
+2. The CoreDNS server with external-dns plugin is now running. It will:
+   - Serve DNS queries on port 53
+{{- if .Values.dnsendpoint.createCRD }}
+   - Watch for DNSEndpoint CRDs in the cluster (CRD was created by this chart)
+{{- else }}
+   - Watch for DNSEndpoint CRDs in the cluster (using existing CRD)
+{{- end }}
+   - Provide metrics on port 9153
+
+3. To create a DNSEndpoint resource for testing:
+   kubectl apply -f - <<EOF
+   apiVersion: externaldns.k8s.io/v1alpha1
+   kind: DNSEndpoint
+   metadata:
+     name: example-endpoint
+     namespace: {{ .Release.Namespace }}
+   spec:
+     endpoints:
+     - dnsName: "example.{{ .Release.Namespace }}.local"
+       recordTTL: 300
+       recordType: A
+       targets:
+       - "192.168.1.100"
+   EOF
+
+4. To check the CoreDNS logs:
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name=coredns
+
+5. To verify DNS resolution:
+   kubectl run -it --rm debug --image=busybox --restart=Never -- nslookup example.{{ .Release.Namespace }}.local {{ .Release.Name }}-coredns.{{ .Release.Namespace }}.svc.cluster.local

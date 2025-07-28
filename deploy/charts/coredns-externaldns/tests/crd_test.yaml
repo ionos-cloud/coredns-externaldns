@@ -1,0 +1,46 @@
+suite: test CRD creation
+templates:
+  - crd.yaml
+tests:
+  - it: should create DNSEndpoint CRD when dnsendpoint.createCRD is true
+    set:
+      dnsendpoint.createCRD: true
+    asserts:
+      - isKind:
+          of: CustomResourceDefinition
+      - equal:
+          path: metadata.name
+          value: dnsendpoints.externaldns.k8s.io
+      - equal:
+          path: spec.group
+          value: externaldns.k8s.io
+      - equal:
+          path: spec.names.kind
+          value: DNSEndpoint
+      - equal:
+          path: spec.names.plural
+          value: dnsendpoints
+      - equal:
+          path: spec.scope
+          value: Namespaced
+
+  - it: should not create CRD when dnsendpoint.createCRD is false
+    set:
+      dnsendpoint.createCRD: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should have proper OpenAPI schema validation
+    set:
+      dnsendpoint.createCRD: true
+    asserts:
+      - exists:
+          path: spec.versions[0].schema.openAPIV3Schema
+      - equal:
+          path: spec.versions[0].schema.openAPIV3Schema.type
+          value: object
+      - exists:
+          path: spec.versions[0].schema.openAPIV3Schema.properties.spec
+      - exists:
+          path: spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.endpoints

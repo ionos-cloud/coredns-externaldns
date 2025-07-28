@@ -72,3 +72,60 @@ jobs:
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
+
+  helm-chart:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Configure Git
+      run: |
+        git config user.name "$GITHUB_ACTOR"
+        git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+    - name: Install Helm
+      uses: azure/setup-helm@v4
+
+    - name: Install Helm unittest plugin
+      run: helm plugin install https://github.com/helm-unittest/helm-unittest
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Lint Helm chart
+      run: helm lint deploy/charts/coredns-externaldns
+
+    - name: Run Helm chart tests
+      run: helm unittest deploy/charts/coredns-externaldns
+
+    - name: Package and push chart to OCI registry
+      if: github.event_name != 'pull_request'
+      run: |
+        # Set version based on event type
+        if [ "${{ github.event_name }}" = "release" ]; then
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION=${VERSION#v}
+        elif [ "${{ github.ref_name }}" = "main" ]; then
+          VERSION="main.${{ github.run_number }}"
+        else
+          VERSION="${{ github.ref_name }}.${{ github.run_number }}"
+        fi
+
+        echo "Packaging chart with version: $VERSION"
+        helm package deploy/charts/coredns-externaldns --version "$VERSION" --app-version "$VERSION"
+
+        CHART_PACKAGE="coredns-externaldns-${VERSION}.tgz"
+        CHART_REGISTRY="${{ env.REGISTRY }}/${{ github.repository }}/charts"
+
+        echo "Pushing chart package: $CHART_PACKAGE to $CHART_REGISTRY"
+        helm push "$CHART_PACKAGE" "oci://$CHART_REGISTRY"

@@ -64,3 +64,13 @@ coverage.html
 # Environment files
 .env
 .env.local
+
+# Helm
+deploy/charts/*/charts/
+deploy/charts/*/Chart.lock
+*.tgz
+# Helm unittest snapshots
+__snapshot__/
+*/__snapshot__/
+# Helm debug/template output
+.debug/
