@@ -24,45 +24,22 @@ builds:
       - -X main.appName=CoreDNS-ExternalDNS
       - -X main.appVersion={{.Version}}
 
-dockers:
-  # Docker image for standalone CoreDNS
-  - image_templates:
-      - "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}-amd64"
-      - "ghcr.io/ionos-cloud/coredns-externaldns:latest-amd64"
-    dockerfile: Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.source={{.GitURL}}"
-
-  - image_templates:
-      - "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}-arm64"
-      - "ghcr.io/ionos-cloud/coredns-externaldns:latest-arm64"
-    dockerfile: Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.source={{.GitURL}}"
-
-docker_manifests:
-  # Multi-arch manifest
-  - name_template: "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}-amd64"
-      - "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}-arm64"
-
-  - name_template: "ghcr.io/ionos-cloud/coredns-externaldns:latest"
-    image_templates:
-      - "ghcr.io/ionos-cloud/coredns-externaldns:latest-amd64"
-      - "ghcr.io/ionos-cloud/coredns-externaldns:latest-arm64"
+kos:
+  - repositories:
+      - ghcr.io/ionos-cloud/coredns-externaldns
+    tags:
+      - latest
+      - "{{ .Tag }}"
+    platforms:
+      - linux/arm/v6
+      - linux/arm/v7
+      - linux/arm64
+      - linux/amd64
+      - linux/386
+    base_image: alpine
+    bare: true
+    build: standalone
+    sbom: none
 
 archives:
   - id: standalone

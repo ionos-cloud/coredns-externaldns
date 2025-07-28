@@ -78,7 +78,7 @@ jobs:
     - name: Package and push Helm chart
       run: |
         VERSION="${{ steps.version.outputs.version }}"
-        
+
         echo "Packaging chart with version: $VERSION"
         helm package deploy/charts/coredns-externaldns --version "$VERSION" --app-version "$VERSION"
 
