@@ -16,8 +16,6 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
-      - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -68,7 +66,7 @@ docker_manifests:
 
 archives:
   - id: standalone
-    builds:
+    ids:
       - standalone
     name_template: "{{ .ProjectName }}-{{ .Version }}.{{ .Os }}.{{ .Arch }}"
 

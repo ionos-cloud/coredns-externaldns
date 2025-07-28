@@ -26,9 +26,6 @@ WORKDIR /root/
 # Copy the standalone binary from builder stage
 COPY --from=builder /workspace/coredns-externaldns .
 
-# Copy example Corefile for standalone usage
-COPY Corefile.standalone Corefile
-
 # Expose DNS ports (UDP and TCP)
 EXPOSE 53 53/udp
 
