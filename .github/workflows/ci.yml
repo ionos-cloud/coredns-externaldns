@@ -109,17 +109,11 @@ jobs:
       run: helm unittest deploy/charts/coredns-externaldns
 
     - name: Package and push chart to OCI registry
-      if: github.event_name != 'pull_request'
+      if: github.event_name == 'release'
       run: |
-        # Set version based on event type
-        if [ "${{ github.event_name }}" = "release" ]; then
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION=${VERSION#v}
-        elif [ "${{ github.ref_name }}" = "main" ]; then
-          VERSION="main.${{ github.run_number }}"
-        else
-          VERSION="${{ github.ref_name }}.${{ github.run_number }}"
-        fi
+        # Extract version from release tag
+        VERSION="${{ github.event.release.tag_name }}"
+        VERSION=${VERSION#v}  # Remove 'v' prefix if present
 
         echo "Packaging chart with version: $VERSION"
         helm package deploy/charts/coredns-externaldns --version "$VERSION" --app-version "$VERSION"
