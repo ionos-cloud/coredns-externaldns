@@ -18,7 +18,7 @@ helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/cor
 To install a specific version:
 
 ```bash
-helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns --version 1.0.0
+helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns --version 0.1.0
 ```
 
 ## Repository Information
@@ -109,7 +109,7 @@ dnsendpoint:
 coredns:
   image:
     repository: ghcr.io/ionos-cloud/coredns-externaldns
-    tag: "v1.12.2-externaldns"
+    tag: "v0.1.0"
 ```
 
 ### Testing DNS Resolution

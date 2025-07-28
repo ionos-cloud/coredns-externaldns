@@ -3,8 +3,8 @@ BINARY_NAME=externaldns-plugin
 STANDALONE_BINARY=coredns-externaldns
 DOCKER_IMAGE=coredns-externaldns
 DOCKER_STANDALONE_IMAGE=coredns-externaldns-standalone
-VERSION?=latest
-REGISTRY?=localhost:5000
+VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "v0.1.0-dev")
+REGISTRY?=ghcr.io/ionos-cloud
 
 # Go parameters
 GOCMD=go
@@ -14,7 +14,7 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 
-.PHONY: all build build-plugin build-standalone clean test deps docker-build docker-build-tag docker-push docker-run docker-run-custom help
+.PHONY: all build build-plugin build-standalone clean test deps docker-build docker-build-tag docker-push docker-run docker-run-custom version help
 
 # Default target
 all: deps test build
@@ -47,6 +47,10 @@ deps:
 # Verify dependencies
 verify:
 	$(GOMOD) verify
+
+# Show current version
+version:
+	@echo "Current version: $(VERSION)"
 
 # Run linter
 lint:
@@ -141,6 +145,7 @@ help:
 	@echo "  dev-deps           Install development dependencies"
 	@echo "  generate           Generate code (mocks, etc.)"
 	@echo "  run-local          Run plugin locally"
+	@echo "  version            Show current version"
 	@echo ""
 	@echo "Docker Targets:"
 	@echo "  docker-build       Build Docker image (standalone CoreDNS)"

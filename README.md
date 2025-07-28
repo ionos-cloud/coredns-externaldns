@@ -112,7 +112,7 @@ The easiest way to deploy in Kubernetes is using the official Helm chart:
 helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns
 
 # Install specific version
-helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns --version 1.0.0
+helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns --version 0.1.0
 
 # Install with custom configuration
 helm install my-coredns oci://ghcr.io/ionos-cloud/coredns-externaldns/charts/coredns-externaldns -f values.yaml

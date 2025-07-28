@@ -3,7 +3,7 @@ name: coredns-externaldns
 description: A Helm chart for CoreDNS with external-dns plugin integration
 type: application
 version: 0.1.0
-appVersion: "latest"
+appVersion: "v0.1.0"
 home: https://github.com/ionos-cloud/coredns-externaldns
 sources:
   - https://github.com/ionos-cloud/coredns-externaldns
@@ -20,7 +20,7 @@ annotations:
   artifacthub.io/containsSecurityUpdates: "false"
   artifacthub.io/images: |
     - name: coredns
-      image: ghcr.io/ionos-cloud/coredns-externaldns:v1.12.2-externaldns
+      image: ghcr.io/ionos-cloud/coredns-externaldns:v0.1.0
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
     - name: Chart Source
