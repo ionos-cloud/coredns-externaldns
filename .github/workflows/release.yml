@@ -75,6 +75,14 @@ jobs:
         VERSION=${VERSION#v}  # Remove 'v' prefix if present
         echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+    - name: Update Helm chart dependencies
+      run: |
+        cd deploy/charts/coredns-externaldns
+        echo "Updating dependencies..."
+        helm dependency update
+        echo "Validating chart..."
+        helm lint .
+
     - name: Package and push Helm chart
       run: |
         VERSION="${{ steps.version.outputs.version }}"
