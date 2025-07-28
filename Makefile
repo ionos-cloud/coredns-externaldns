@@ -5,6 +5,12 @@ DOCKER_IMAGE=coredns-externaldns
 DOCKER_STANDALONE_IMAGE=coredns-externaldns-standalone
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "v0.1.0-dev")
 REGISTRY?=ghcr.io/ionos-cloud
+COMMIT?=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+# Build flags for version information
+LDFLAGS_STANDALONE=-ldflags "-s -w \
+  -X main.appName=CoreDNS-ExternalDNS \
+  -X main.appVersion=$(VERSION)"
 
 # Go parameters
 GOCMD=go
@@ -14,7 +20,7 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 
-.PHONY: all build build-plugin build-standalone clean test deps docker-build docker-build-tag docker-push docker-run docker-run-custom version help
+.PHONY: all build build-plugin build-standalone clean test deps docker-build docker-build-tag docker-push docker-run docker-run-custom version release-snapshot release-test help
 
 # Default target
 all: deps test build
@@ -28,7 +34,7 @@ build-plugin:
 
 # Build standalone CoreDNS with plugin included
 build-standalone:
-	CGO_ENABLED=0 GOOS=linux $(GOBUILD) -a -installsuffix cgo -o $(STANDALONE_BINARY) ./cmd/coredns-externaldns
+	CGO_ENABLED=0 GOOS=linux $(GOBUILD) $(LDFLAGS_STANDALONE) -a -installsuffix cgo -o $(STANDALONE_BINARY) ./cmd/coredns-externaldns
 
 # Clean build artifacts
 clean:
@@ -81,6 +87,15 @@ docker-run-custom:
 # Install development dependencies
 dev-deps:
 	$(GOGET) -u github.com/golangci/golangci-lint/cmd/golangci-lint
+	$(GOGET) -u github.com/goreleaser/goreleaser@latest
+
+# Build release with GoReleaser (snapshot)
+release-snapshot:
+	goreleaser release --snapshot --clean
+
+# Test GoReleaser configuration
+release-test:
+	goreleaser check
 
 # Generate mocks (if needed for testing)
 generate:
@@ -146,6 +161,8 @@ help:
 	@echo "  generate           Generate code (mocks, etc.)"
 	@echo "  run-local          Run plugin locally"
 	@echo "  version            Show current version"
+	@echo "  release-snapshot   Build release snapshot with GoReleaser"
+	@echo "  release-test       Test GoReleaser configuration"
 	@echo ""
 	@echo "Docker Targets:"
 	@echo "  docker-build       Build Docker image (standalone CoreDNS)"

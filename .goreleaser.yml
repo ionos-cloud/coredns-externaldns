@@ -1,0 +1,82 @@
+# GoReleaser configuration
+version: 2
+
+project_name: coredns-externaldns
+
+before:
+  hooks:
+    - make deps
+
+builds:
+  # Standalone CoreDNS binary
+  - id: standalone
+    binary: coredns-externaldns
+    main: ./cmd/coredns-externaldns
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.appName=CoreDNS-ExternalDNS
+      - -X main.appVersion={{.Version}}
+
+dockers:
+  # Docker image for standalone CoreDNS
+  - image_templates:
+      - "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}-amd64"
+      - "ghcr.io/ionos-cloud/coredns-externaldns:latest-amd64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source={{.GitURL}}"
+
+  - image_templates:
+      - "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}-arm64"
+      - "ghcr.io/ionos-cloud/coredns-externaldns:latest-arm64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source={{.GitURL}}"
+
+docker_manifests:
+  # Multi-arch manifest
+  - name_template: "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}-amd64"
+      - "ghcr.io/ionos-cloud/coredns-externaldns:{{ .Version }}-arm64"
+
+  - name_template: "ghcr.io/ionos-cloud/coredns-externaldns:latest"
+    image_templates:
+      - "ghcr.io/ionos-cloud/coredns-externaldns:latest-amd64"
+      - "ghcr.io/ionos-cloud/coredns-externaldns:latest-arm64"
+
+archives:
+  - id: standalone
+    builds:
+      - standalone
+    name_template: "{{ .ProjectName }}-{{ .Version }}.{{ .Os }}.{{ .Arch }}"
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github-native

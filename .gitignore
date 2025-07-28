@@ -74,3 +74,9 @@ __snapshot__/
 */__snapshot__/
 # Helm debug/template output
 .debug/
+
+# GoReleaser artifacts
+dist/
+*.tar.gz
+*.zip
+checksums.txt

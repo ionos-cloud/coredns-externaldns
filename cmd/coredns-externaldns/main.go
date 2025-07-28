@@ -15,8 +15,15 @@ import (
 	_ "github.com/coredns/coredns/core/plugin"
 )
 
+// Version information (can be overridden with -ldflags)
+var (
+	appName    = "CoreDNS-ExternalDNS"
+	appVersion = "dev"
+)
+
 func init() {
 	// Find etcd and insert externaldns plugin after it
+	inserted := false
 	for i, dir := range dnsserver.Directives {
 		if dir == "etcd" {
 			// Insert externaldns after etcd using slice insertion
@@ -24,11 +31,18 @@ func init() {
 				dnsserver.Directives[:i+1],
 				append([]string{"externaldns"}, dnsserver.Directives[i+1:]...)...,
 			)
-			return
+
+			inserted = true
+			break
 		}
 	}
+	if !inserted {
+		panic("etcd directive not found, cannot insert externaldns plugin")
+	}
 
-	panic("etcd directive not found in CoreDNS directives")
+	// Override CoreDNS app name and version after CoreDNS init
+	caddy.AppName = appName
+	caddy.AppVersion = appVersion
 }
 
 func main() {
