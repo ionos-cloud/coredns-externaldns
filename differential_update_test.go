@@ -152,7 +152,7 @@ func TestContinuousAvailabilityDuringUpdate(t *testing.T) {
 	}
 
 	// Add initial record
-	_ = e.addEndpointToCacheAndCollectRefs(ep, false, endpointKey)
+	_ = e.addEndpointToCache(ep, false, endpointKey)
 
 	// Verify initial state
 	records := e.cache.GetRecords("service.example.com.", dns.TypeA)
@@ -169,7 +169,7 @@ func TestContinuousAvailabilityDuringUpdate(t *testing.T) {
 	}
 
 	// Add new record (this happens first in real scenario)
-	newRefs := e.addEndpointToCacheAndCollectRefs(modifiedEp, false, endpointKey)
+	newRefs := e.addEndpointToCache(modifiedEp, false, endpointKey)
 
 	// At this point, both records should exist temporarily
 	recordsDuringUpdate := e.cache.GetRecords("service.example.com.", dns.TypeA)

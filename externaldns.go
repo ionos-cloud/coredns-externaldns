@@ -127,6 +127,23 @@ func (c *DNSCache) metricsUpdateLoop() {
 	}
 }
 
+// generateConsistentSerial produces a deterministic serial number based on creation timestamp and generation.
+// Ensures all CoreDNS instances generate the same serial for the same CR state.
+// Format: YYYYMMDDnn, where nn is derived from .metadata.generation.
+func generateConsistentSerial(obj *unstructured.Unstructured) uint32 {
+	t := obj.GetCreationTimestamp()
+	if t.IsZero() {
+		// Fallback: use current time if creationTimestamp is unset
+		t = metav1.NewTime(time.Now())
+	}
+
+	// Format date as YYYYMMDD and reserve two digits (nn) for generation
+	base := uint32(t.Year()*10000 + int(t.Month())*100 + t.Day())
+	serial := base*100 + uint32(obj.GetGeneration())
+
+	return serial
+}
+
 func getRecordName(name string) string {
 	// Normalize the name to lowercase and FQDN
 	name = strings.ToLower(name)
@@ -173,8 +190,8 @@ func (c *DNSCache) AddRecordWithEndpoint(name string, qtype uint16, rr dns.RR, e
 
 	log.Debugf("Added record: %s %s -> %s (endpoint: %s)", name, dns.TypeToString[qtype], rr.String(), endpointKey)
 
-	// Update zone serial
-	zone.Serial = uint32(time.Now().Unix())
+	// NOTE: Serial updates are now handled atomically at the endpoint level
+	// Do not update zone serial here
 }
 
 // AddRecord adds a DNS record to the cache
@@ -245,7 +262,7 @@ func (c *DNSCache) RemoveRecord(name string, qtype uint16, target string) {
 }
 
 // UpdateRecordsByEndpointWithAddition performs a differential update that ensures DNS availability
-// It adds new records first, then removes only obsolete ones
+// It adds new records first, then removes only obsolete ones, without updating zone serials
 func (c *DNSCache) UpdateRecordsByEndpointWithAddition(endpointKey string, newRecords []RecordRef, plugin *ExternalDNS, createPTR bool) {
 	c.Lock()
 	existingRecords, hasExisting := c.endpointRecords[endpointKey]
@@ -374,7 +391,7 @@ func (c *DNSCache) RemoveRecordsByEndpoint(endpointKey string) {
 	c.removeSpecificRecords(recordRefs)
 }
 
-// removeSpecificRecords removes only the specified records
+// removeSpecificRecords removes only the specified records without updating zone serials
 func (c *DNSCache) removeSpecificRecords(recordsToRemove []RecordRef) {
 	// Group records by zone to minimize lock operations
 	zoneGroups := make(map[string][]RecordRef)
@@ -416,8 +433,8 @@ func (c *DNSCache) removeSpecificRecords(recordsToRemove []RecordRef) {
 			}
 		}
 
-		// Update zone serial once per zone
-		zone.Serial = uint32(time.Now().Unix())
+		// NOTE: Serial updates are now handled atomically at the endpoint level
+		// Do not update zone serial here
 		zone.Unlock()
 	}
 }
@@ -566,15 +583,15 @@ func (c *DNSCache) getOrCreateZoneUnlocked(zoneName string) *Zone {
 	return zone
 }
 
-// updateZoneSerial updates the serial number for a zone
-func (c *DNSCache) updateZoneSerial(zoneName string) {
+// updateZoneSerial updates the serial number for a zone with a specific serial
+func (c *DNSCache) updateZoneSerial(zoneName string, serial uint32) {
 	c.RLock()
 	zone, exists := c.zones[zoneName]
 	c.RUnlock()
 
 	if exists && zone != nil {
 		zone.Lock()
-		zone.Serial = uint32(time.Now().Unix())
+		zone.Serial = serial
 		zone.Unlock()
 		log.Debugf("Updated serial for zone %s to %d", zoneName, zone.Serial)
 	}
@@ -899,6 +916,12 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 	log.Debugf("Processing DNSEndpoint %s/%s (event: %s)",
 		obj.GetNamespace(), obj.GetName(), eventType)
 
+	// Generate consistent serial number based on CR metadata
+	// This ensures all CoreDNS instances generate the same serial for the same CR state
+	consistentSerial := generateConsistentSerial(obj)
+	log.Debugf("Generated consistent serial %d for DNSEndpoint %s/%s (resourceVersion: %s, generation: %d)",
+		consistentSerial, obj.GetNamespace(), obj.GetName(), obj.GetResourceVersion(), obj.GetGeneration())
+
 	// Check for PTR record creation annotation
 	createPTR := false
 	if annotations := obj.GetAnnotations(); annotations != nil {
@@ -922,13 +945,18 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 	case "ADDED":
 		endpointKey := fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName())
 
-		// For new endpoints, just add records normally
+		// For new endpoints, add records without serial updates during processing
+		var addedRecordRefs []RecordRef
 		for _, ep := range endpoints {
-			e.addEndpointToCache(ep, createPTR, endpointKey)
+			refs := e.addEndpointToCache(ep, createPTR, endpointKey)
+			addedRecordRefs = append(addedRecordRefs, refs...)
 		}
 
-		log.Debugf("Added cache with %d endpoints from %s/%s (createPTR: %v)",
-			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR)
+		// Update zone serials ONCE at the end for all affected zones
+		e.updateZoneSerialsForRecords(addedRecordRefs, consistentSerial)
+
+		log.Debugf("Added cache with %d endpoints from %s/%s (createPTR: %v, serial: %d)",
+			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR, consistentSerial)
 
 	case "MODIFIED":
 		endpointKey := fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName())
@@ -945,10 +973,15 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 		// 1. Adds any new records that don't exist
 		// 2. Removes only records that are no longer needed
 		// 3. Keeps unchanged records untouched
+		// 4. Does NOT update zone serials during processing
 		e.cache.UpdateRecordsByEndpointWithAddition(endpointKey, newRecordRefs, e, createPTR)
 
-		log.Debugf("Modified cache with %d endpoints from %s/%s (createPTR: %v)",
-			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR)
+		// Update zone serials ONCE at the end for all affected zones
+		// This ensures slaves see atomic updates and don't request AXFR mid-processing
+		e.updateZoneSerialsForRecords(newRecordRefs, consistentSerial)
+
+		log.Debugf("Modified cache with %d endpoints from %s/%s (createPTR: %v, serial: %d)",
+			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR, consistentSerial)
 
 	case "DELETED":
 		// Remove all records for this DNSEndpoint
@@ -1006,16 +1039,19 @@ func (e *ExternalDNS) extractEndpoints(obj *unstructured.Unstructured) ([]*endpo
 	return endpoints, nil
 }
 
-// addEndpointToCache adds an endpoint to the DNS cache
-func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool, endpointKey string) {
+// addEndpointToCache adds an endpoint to the DNS cache without updating serials
+// Returns the RecordRef references for the added records
+func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool, endpointKey string) []RecordRef {
+	var refs []RecordRef
+
 	if ep.DNSName == "" || len(ep.Targets) == 0 {
-		return
+		return refs
 	}
 
 	qtype := e.recordTypeToQType(ep.RecordType)
 	if qtype == 0 {
 		log.Warningf("Unsupported record type: %s", ep.RecordType)
-		return
+		return refs
 	}
 
 	ttl := e.ttl
@@ -1026,14 +1062,33 @@ func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool, 
 	for _, target := range ep.Targets {
 		rr := e.createDNSRecord(ep.DNSName, qtype, ttl, target)
 		if rr != nil {
+			// Add record without serial update
 			e.cache.AddRecordWithEndpoint(ep.DNSName, qtype, rr, endpointKey, target)
+
+			// Collect reference for the main record
+			normalizedTarget := target
+			switch qtype {
+			case dns.TypeCNAME, dns.TypeMX, dns.TypeSRV, dns.TypePTR, dns.TypeNS:
+				normalizedTarget = dns.Fqdn(target)
+			}
+
+			ref := RecordRef{
+				Zone:   getZoneName(getRecordName(ep.DNSName)),
+				Name:   getRecordName(ep.DNSName),
+				Type:   qtype,
+				Target: normalizedTarget,
+			}
+			refs = append(refs, ref)
 
 			// Create PTR records for A and AAAA records if annotation is present
 			if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
-				e.createAndAddPTRRecord(ep.DNSName, target, ttl, endpointKey)
+				ptrRefs := e.createAndAddPTRRecordWithRefs(ep.DNSName, target, ttl, endpointKey)
+				refs = append(refs, ptrRefs...)
 			}
 		}
 	}
+
+	return refs
 }
 
 // collectRecordRefs collects RecordRef references for an endpoint without adding to cache
@@ -1110,6 +1165,21 @@ func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) [
 	return refs
 }
 
+// updateZoneSerialsForRecords updates the serial for all zones affected by the given records
+func (e *ExternalDNS) updateZoneSerialsForRecords(records []RecordRef, serial uint32) {
+	// Collect unique zones from the records
+	affectedZones := make(map[string]bool)
+	for _, ref := range records {
+		affectedZones[ref.Zone] = true
+	}
+
+	// Update serial for each affected zone
+	for zoneName := range affectedZones {
+		e.cache.updateZoneSerial(zoneName, serial)
+		log.Debugf("Updated serial for zone %s to %d (atomic endpoint update)", zoneName, serial)
+	}
+}
+
 // addRecordFromRef adds a single record to the cache based on a RecordRef
 func (e *ExternalDNS) addRecordFromRef(ref RecordRef, endpointKey string) {
 	// Create the DNS record
@@ -1158,56 +1228,6 @@ func (e *ExternalDNS) createDNSRecordFromRef(ref RecordRef) dns.RR {
 		log.Warningf("Unsupported record type in ref: %s", dns.TypeToString[ref.Type])
 		return nil
 	}
-}
-
-// addEndpointToCacheAndCollectRefs adds records and returns their references for tracking
-func (e *ExternalDNS) addEndpointToCacheAndCollectRefs(ep *endpoint.Endpoint, createPTR bool, endpointKey string) []RecordRef {
-	var refs []RecordRef
-
-	if ep.DNSName == "" || len(ep.Targets) == 0 {
-		return refs
-	}
-
-	qtype := e.recordTypeToQType(ep.RecordType)
-	if qtype == 0 {
-		log.Warningf("Unsupported record type: %s", ep.RecordType)
-		return refs
-	}
-
-	ttl := e.ttl
-	if ep.RecordTTL > 0 {
-		ttl = uint32(ep.RecordTTL)
-	}
-
-	for _, target := range ep.Targets {
-		rr := e.createDNSRecord(ep.DNSName, qtype, ttl, target)
-		if rr != nil {
-			e.cache.AddRecordWithEndpoint(ep.DNSName, qtype, rr, endpointKey, target)
-
-			// Add reference for the main record
-			normalizedTarget := target
-			switch qtype {
-			case dns.TypeCNAME, dns.TypeMX, dns.TypeSRV, dns.TypePTR, dns.TypeNS:
-				normalizedTarget = dns.Fqdn(target)
-			}
-
-			ref := RecordRef{
-				Zone:   getZoneName(getRecordName(ep.DNSName)),
-				Name:   getRecordName(ep.DNSName),
-				Type:   qtype,
-				Target: normalizedTarget,
-			}
-			refs = append(refs, ref)
-
-			// Create PTR records for A and AAAA records if annotation is present
-			if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
-				ptrRefs := e.createAndAddPTRRecordWithRefs(ep.DNSName, target, ttl, endpointKey)
-				refs = append(refs, ptrRefs...)
-			}
-		}
-	}
-
-	return refs
 }
 
 // recordTypeToQType converts string record type to DNS qtype
@@ -1321,28 +1341,6 @@ func (e *ExternalDNS) createDNSRecord(name string, qtype uint16, ttl uint32, tar
 	default:
 		return nil
 	}
-}
-
-// createAndAddPTRRecord creates and adds a PTR record for the given IP address
-func (e *ExternalDNS) createAndAddPTRRecord(hostname, ipAddr string, ttl uint32, endpointKey string) {
-	ptrName := e.createReverseDNSName(ipAddr)
-	if ptrName == "" {
-		return
-	}
-
-	ptrRecord := &dns.PTR{
-		Hdr: dns.RR_Header{
-			Name:   ptrName,
-			Rrtype: dns.TypePTR,
-			Class:  dns.ClassINET,
-			Ttl:    ttl,
-		},
-		Ptr: dns.Fqdn(hostname),
-	}
-
-	e.cache.AddRecordWithEndpoint(ptrName, dns.TypePTR, ptrRecord, endpointKey, dns.Fqdn(hostname))
-
-	log.Debugf("Created PTR record: %s -> %s", ptrName, hostname)
 }
 
 // createAndAddPTRRecordWithRefs creates PTR record and returns its reference

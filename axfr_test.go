@@ -68,40 +68,6 @@ func TestAXFRSupport(t *testing.T) {
 	}
 }
 
-func TestZoneManagement(t *testing.T) {
-	cache := NewDNSCache(time.Minute)
-
-	// Test zone creation
-	zone := cache.getOrCreateZone("example.com.")
-	if zone == nil {
-		t.Fatal("Failed to create zone")
-	}
-
-	if zone.Name != "example.com." {
-		t.Errorf("Expected zone name 'example.com.', got '%s'", zone.Name)
-	}
-
-	// Test zone serial update
-	originalSerial := zone.Serial
-
-	// Sleep a bit to ensure different timestamp
-	time.Sleep(1 * time.Second)
-
-	cache.updateZoneSerial("example.com.")
-
-	cache.RLock()
-	updatedZone := cache.zones["example.com."]
-	cache.RUnlock()
-
-	updatedZone.RLock()
-	newSerial := updatedZone.Serial
-	updatedZone.RUnlock()
-
-	if newSerial <= originalSerial {
-		t.Errorf("Expected serial to increase from %d, got %d", originalSerial, newSerial)
-	}
-}
-
 func TestGetZoneName(t *testing.T) {
 	tests := []struct {
 		input    string
