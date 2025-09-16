@@ -4,7 +4,15 @@ coredns:
   image:
     repository: ghcr.io/ionos-cloud/coredns-externaldns
     tag: ""
-    pullPolicy: IfNotPresent
+
+  # Use our own rbac
+  rbac:
+    create: false
+
+  # Set the created service account name
+  serviceAccount:
+    create: false
+    name: coredns-externaldns
 
 # DNSEndpoint Custom Resource Definition configuration
 dnsendpoint:
@@ -15,12 +23,12 @@ dnsendpoint:
 rbac:
   # Create RBAC resources
   create: true
-  
+
   # Service account name
   serviceAccountName: coredns-externaldns
-  
+
   # Additional labels for RBAC resources
   labels: {}
-  
+
   # Additional annotations for RBAC resources
   annotations: {}
