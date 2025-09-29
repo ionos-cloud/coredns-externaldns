@@ -343,3 +343,36 @@ func TestZoneMetrics(t *testing.T) {
 	// This test mainly verifies that the code runs without errors
 	// In a real environment, you could check Prometheus metrics registry
 }
+
+func TestGetZoneName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    "test.example.com.",
+			expected: "example.com.",
+		},
+		{
+			input:    "www.test.example.com.",
+			expected: "test.example.com.",
+		},
+		{
+			input:    "example.com.",
+			expected: "com.",
+		},
+		{
+			input:    "single",
+			expected: "single.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := getZoneName(tt.input)
+			if result != tt.expected {
+				t.Errorf("getZoneName(%s) = %s, want %s", tt.input, result, tt.expected)
+			}
+		})
+	}
+}

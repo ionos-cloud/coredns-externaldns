@@ -551,11 +551,12 @@ func (c *DNSCache) recordMatches(rr dns.RR, target string) bool {
 
 // getZoneName extracts the zone name from a domain name
 func getZoneName(name string) string {
-	parts := strings.Split(strings.TrimSuffix(name, "."), ".")
-	if len(parts) >= 2 {
-		return strings.Join(parts[len(parts)-2:], ".") + "."
+	fqdn := dns.Fqdn(name)
+	labels := dns.SplitDomainName(fqdn)
+	if len(labels) <= 1 {
+		return fqdn // Root zone or invalid
 	}
-	return name
+	return dns.Fqdn(strings.Join(labels[1:], "."))
 }
 
 // getOrCreateZone gets an existing zone or creates it if it doesn't exist

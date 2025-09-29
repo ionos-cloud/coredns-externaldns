@@ -68,39 +68,6 @@ func TestAXFRSupport(t *testing.T) {
 	}
 }
 
-func TestGetZoneName(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{
-			input:    "test.example.com.",
-			expected: "example.com.",
-		},
-		{
-			input:    "www.test.example.com.",
-			expected: "example.com.",
-		},
-		{
-			input:    "example.com.",
-			expected: "example.com.",
-		},
-		{
-			input:    "single",
-			expected: "single",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := getZoneName(tt.input)
-			if result != tt.expected {
-				t.Errorf("getZoneName(%s) = %s, want %s", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestRebuildZoneRecords(t *testing.T) {
 	cache := NewDNSCache(time.Minute)
 
