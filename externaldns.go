@@ -661,10 +661,9 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
 	log.Debugf("Query for %s %s", qname, dns.TypeToString[qtype])
 
-	// Handle AXFR requests
-	if qtype == dns.TypeAXFR {
-		log.Debugf("Handling AXFR request for zone: %s", qname)
-		return e.handleAXFR(w, r, qname)
+	// If transfer is not loaded, we'll see these, answer with refused (no transfer allowed).
+	if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
+		return dns.RcodeRefused, nil
 	}
 
 	// Increment request counter
@@ -724,39 +723,37 @@ func (e *ExternalDNS) Transfer(zone string, serial uint32) (<-chan []dns.RR, err
 	e.cache.getOrCreateZone(zoneName)
 
 	e.cache.RLock()
-	zoneInfo, exists := e.cache.zones[zoneName]
+	records := e.cache.getZoneRecordsForAXFR(zoneName)
 	e.cache.RUnlock()
 
-	if !exists {
+	if len(records) == 0 {
 		log.Debugf("Zone %s not found for AXFR", zoneName)
-		return nil, fmt.Errorf("zone %s not found", zoneName)
-	}
-
-	zoneInfo.RLock()
-	currentSerial := zoneInfo.Serial
-	zoneInfo.RUnlock()
-
-	// If the requested serial is the same or newer, no transfer needed
-	if serial >= currentSerial {
-		log.Debugf("No transfer needed for zone %s (current: %d, requested: %d)", zoneName, currentSerial, serial)
 		return nil, transfer.ErrNotAuthoritative
 	}
 
-	// Get all records for the zone
-	records := e.cache.getZoneRecordsForAXFR(zoneName)
+	// First SOA must appear at the start
+	soa := records[0]
 
 	// Create channel and send records
-	ch := make(chan []dns.RR, 1)
-
+	ch := make(chan []dns.RR)
 	go func() {
 		defer close(ch)
 
+		if serial != 0 && soa.(*dns.SOA).Serial == serial { // ixfr fallback, only send SOA
+			log.Debugf("Zone %s serial %d matches requested serial %d, sending only SOA", zoneName, soa.(*dns.SOA).Serial, serial)
+			ch <- []dns.RR{soa}
+
+			return
+		}
+
 		log.Debugf("Sending AXFR for zone %s with %d records", zoneName, len(records))
 
-		// Send all records for the zone
-		if len(records) > 0 {
-			ch <- records
-		}
+		// Send all records, starting with SOA
+		ch <- records
+
+		// And AXFR must end with SOA again
+		ch <- []dns.RR{soa}
+		log.Debugf("Completed AXFR for zone %s", zoneName)
 	}()
 
 	return ch, nil
@@ -784,50 +781,6 @@ func (e *ExternalDNS) Serial(zone string) uint32 {
 }
 
 // handleAXFR handles AXFR (zone transfer) requests
-func (e *ExternalDNS) handleAXFR(w dns.ResponseWriter, r *dns.Msg, zone string) (int, error) {
-	zoneName := dns.Fqdn(zone)
-
-	// Ensure zone exists
-	e.cache.getOrCreateZone(zoneName)
-
-	e.cache.RLock()
-	records := e.cache.getZoneRecordsForAXFR(zoneName)
-	e.cache.RUnlock()
-
-	if len(records) == 0 {
-		log.Debugf("Zone %s not found for AXFR", zoneName)
-		return dns.RcodeNotAuth, nil
-	}
-
-	// First SOA must appear at the start
-	if records[0].Header().Rrtype != dns.TypeSOA {
-		return dns.RcodeServerFailure, fmt.Errorf("first record must be SOA")
-	}
-	soa := records[0]
-
-	// Send all records, starting with SOA
-	for _, rr := range records {
-		m := new(dns.Msg)
-		m.SetReply(r)
-		m.Authoritative = true
-		m.Answer = []dns.RR{rr}
-
-		if err := w.WriteMsg(m); err != nil {
-			return dns.RcodeServerFailure, err
-		}
-	}
-
-	// And AXFR must end with SOA again
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.Authoritative = true
-	m.Answer = []dns.RR{soa}
-	if err := w.WriteMsg(m); err != nil {
-		return dns.RcodeServerFailure, err
-	}
-
-	return dns.RcodeSuccess, nil
-}
 
 // Start starts watching DNSEndpoint resources
 func (e *ExternalDNS) Start() error {
