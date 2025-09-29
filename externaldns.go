@@ -897,7 +897,7 @@ func (e *ExternalDNS) loadZoneSerials(ctx context.Context) error {
 }
 
 // saveZoneSerials saves zone serials to ConfigMap
-func (e *ExternalDNS) saveZoneSerials(ctx context.Context) {
+func (e *ExternalDNS) saveZoneSerials(ctx context.Context, updatedZones []string) {
 	if e.coreClient == nil {
 		// Not initialized, skip saving (e.g., in tests)
 		return
@@ -937,7 +937,7 @@ func (e *ExternalDNS) saveZoneSerials(ctx context.Context) {
 
 	// Notify others
 	if e.transfer != nil {
-		for zone := range data {
+		for _, zone := range updatedZones {
 			if err := e.transfer.Notify(zone); err != nil {
 				log.Warningf("Failed to notify transfer of serial update for zone %s: %v", zone, err)
 			}
@@ -1249,19 +1249,30 @@ func (e *ExternalDNS) updateZoneSerialsForRecords(ctx context.Context, records [
 		e.zoneSerials = make(map[string]uint32)
 	}
 
+	updatedZones := make([]string, 0, len(affectedZones))
 	for zoneName := range affectedZones {
+		if proposedSerial == e.zoneSerials[zoneName] {
+			// No change needed
+			continue
+		}
+
 		if proposedSerial > e.zoneSerials[zoneName] {
 			// Use the proposed serial if it's higher
 			e.zoneSerials[zoneName] = proposedSerial
-		} else {
+		} else if proposedSerial < e.zoneSerials[zoneName] {
+			// If proposed serial is lower, increment current serial to ensure monotonic increase
 			e.zoneSerials[zoneName]++
 		}
+
+		updatedZones = append(updatedZones, zoneName)
 		e.cache.updateZoneSerial(zoneName, e.zoneSerials[zoneName])
 		log.Debugf("Updated serial for zone %s to %d (new high serial)", zoneName, e.zoneSerials[zoneName])
 	}
 	e.serialsMutex.Unlock()
 
-	go e.saveZoneSerials(ctx)
+	if len(updatedZones) > 0 {
+		go e.saveZoneSerials(ctx, updatedZones)
+	}
 }
 
 // addRecordFromRef adds a single record to the cache based on a RecordRef
