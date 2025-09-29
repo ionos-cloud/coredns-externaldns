@@ -20,7 +20,7 @@ rules:
 # ConfigMap permissions for CoreDNS configuration
 - apiGroups: [""]
   resources: ["configmaps"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
 # Service and Endpoint permissions for service discovery
 - apiGroups: [""]
   resources: ["services", "endpoints"]
