@@ -43,7 +43,7 @@ clean:
 
 # Run tests
 test:
-	$(GOTEST) -v ./...
+	$(GOTEST) -v -race ./...
 
 # Download dependencies
 deps:

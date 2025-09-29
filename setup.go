@@ -1,12 +1,14 @@
 package externaldns
 
 import (
+	"context"
 	"strconv"
 	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/plugin/transfer"
 )
 
 // init registers this plugin with CoreDNS
@@ -21,8 +23,18 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("externaldns", err)
 	}
 
+	// get the transfer plugin, so we can send notifies and send notifies on startup as well.
+	c.OnStartup(func() error {
+		t := dnsserver.GetConfig(c).Handler("transfer")
+		if t == nil {
+			return nil
+		}
+		ed.transfer = t.(*transfer.Transfer) // if found this must be OK.
+		return nil
+	})
+
 	// Start the plugin
-	err = ed.Start()
+	err = ed.Start(context.Background())
 	if err != nil {
 		return plugin.Error("externaldns", err)
 	}
@@ -48,8 +60,9 @@ func setup(c *caddy.Controller) error {
 // parseExternalDNS parses the plugin configuration
 func parseExternalDNS(c *caddy.Controller) (*ExternalDNS, error) {
 	ed := &ExternalDNS{
-		ttl:                   300,              // Default TTL of 5 minutes
-		metricsUpdateInterval: 30 * time.Second, // Default metrics update interval of 30 seconds
+		ttl:                   300,                                // Default TTL of 5 minutes
+		metricsUpdateInterval: 30 * time.Second,                   // Default metrics update interval of 30 seconds
+		configMapName:         "coredns-externaldns-zone-serials", // Default ConfigMap name
 	}
 
 	for c.Next() {
@@ -78,6 +91,16 @@ func parseExternalDNS(c *caddy.Controller) (*ExternalDNS, error) {
 					return nil, c.Errf("invalid metrics interval value: %s", c.Val())
 				}
 				ed.metricsUpdateInterval = interval
+			case "configmap_name":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				ed.configMapName = c.Val()
+			case "configmap_namespace":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				ed.configMapNamespace = c.Val()
 			default:
 				return nil, c.Errf("unknown property '%s'", c.Val())
 			}

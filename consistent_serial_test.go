@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
 )
 
 func TestGenerateConsistentSerial(t *testing.T) {
@@ -44,7 +44,7 @@ func TestGenerateConsistentSerial(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			obj := &unstructured.Unstructured{}
+			obj := &externaldnsv1alpha1.DNSEndpoint{}
 			obj.SetGeneration(tt.generation)
 			if tt.creationTime != nil {
 				obj.SetCreationTimestamp(*tt.creationTime)
@@ -62,7 +62,7 @@ func TestGenerateConsistentSerial(t *testing.T) {
 
 func TestGenerateConsistentSerialWithoutCreationTime(t *testing.T) {
 	// Test behavior when creation timestamp is missing (should use current time)
-	obj := &unstructured.Unstructured{}
+	obj := &externaldnsv1alpha1.DNSEndpoint{}
 	obj.SetGeneration(2)
 	// Don't set creation timestamp
 
@@ -88,11 +88,11 @@ func TestSerialGenerationDeterministic(t *testing.T) {
 	// Test that identical CRs generate identical serials
 	creationTime := metav1.Time{Time: time.Date(2022, 1, 16, 15, 14, 38, 0, time.UTC)}
 
-	obj1 := &unstructured.Unstructured{}
+	obj1 := &externaldnsv1alpha1.DNSEndpoint{}
 	obj1.SetCreationTimestamp(creationTime)
 	obj1.SetGeneration(3)
 
-	obj2 := &unstructured.Unstructured{}
+	obj2 := &externaldnsv1alpha1.DNSEndpoint{}
 	obj2.SetCreationTimestamp(creationTime)
 	obj2.SetGeneration(3)
 
@@ -109,11 +109,11 @@ func TestSerialGenerationUnique(t *testing.T) {
 	creationTime := metav1.Time{Time: time.Date(2022, 1, 16, 15, 14, 38, 0, time.UTC)}
 
 	// Same creation time, different generation
-	obj1 := &unstructured.Unstructured{}
+	obj1 := &externaldnsv1alpha1.DNSEndpoint{}
 	obj1.SetCreationTimestamp(creationTime)
 	obj1.SetGeneration(1)
 
-	obj2 := &unstructured.Unstructured{}
+	obj2 := &externaldnsv1alpha1.DNSEndpoint{}
 	obj2.SetCreationTimestamp(creationTime)
 	obj2.SetGeneration(2)
 
@@ -123,7 +123,7 @@ func TestSerialGenerationUnique(t *testing.T) {
 	require.NotEqual(t, serial1, serial2, "Different generations should generate different serials")
 
 	// Different creation time, same generation
-	obj3 := &unstructured.Unstructured{}
+	obj3 := &externaldnsv1alpha1.DNSEndpoint{}
 	obj3.SetCreationTimestamp(metav1.Time{Time: time.Date(2022, 1, 17, 15, 14, 38, 0, time.UTC)})
 	obj3.SetGeneration(1)
 
@@ -141,7 +141,7 @@ func TestSerialGenerationConsistencyAcrossInstances(t *testing.T) {
 
 	// Simulate the same CR being processed by different CoreDNS instances
 	for i := 0; i < 10; i++ {
-		obj := &unstructured.Unstructured{}
+		obj := &externaldnsv1alpha1.DNSEndpoint{}
 		obj.SetCreationTimestamp(creationTime)
 		obj.SetGeneration(generation)
 
@@ -182,7 +182,7 @@ func TestSerialGenerationOverflow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			obj := &unstructured.Unstructured{}
+			obj := &externaldnsv1alpha1.DNSEndpoint{}
 			obj.SetCreationTimestamp(metav1.Time{Time: tt.creationTime})
 			obj.SetGeneration(tt.generation)
 
@@ -231,7 +231,7 @@ func TestSerialGenerationRealistic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			obj := &unstructured.Unstructured{}
+			obj := &externaldnsv1alpha1.DNSEndpoint{}
 			obj.SetCreationTimestamp(metav1.Time{Time: tt.creationTime})
 			obj.SetGeneration(tt.generation)
 

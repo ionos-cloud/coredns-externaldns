@@ -50,12 +50,15 @@ func TestAtomicSerialUpdate(t *testing.T) {
 		},
 	}
 
+	ep, err := unstructuredToDNSEndpoint(dnsEndpoint)
+	require.NoError(t, err, "Failed to convert unstructured to DNSEndpoint")
+
 	// Get the expected consistent serial
-	expectedSerial := generateConsistentSerial(dnsEndpoint)
+	expectedSerial := generateConsistentSerial(ep)
 	t.Logf("Expected consistent serial: %d", expectedSerial)
 
 	// Process the endpoint as ADDED
-	plugin.processDNSEndpoint(dnsEndpoint, "ADDED")
+	plugin.processDNSEndpoint(t.Context(), dnsEndpoint, "ADDED")
 
 	// Verify that all zones have the same serial (the consistent one)
 	zoneName := "example.com."
@@ -122,7 +125,7 @@ func TestAtomicSerialUpdateOnModification(t *testing.T) {
 	}
 
 	// Add initial endpoint
-	plugin.processDNSEndpoint(dnsEndpoint, "ADDED")
+	plugin.processDNSEndpoint(t.Context(), dnsEndpoint, "ADDED")
 
 	// Get initial serial
 	zoneName := "example.com."
@@ -149,11 +152,14 @@ func TestAtomicSerialUpdateOnModification(t *testing.T) {
 		},
 	}
 
-	expectedSerial := generateConsistentSerial(dnsEndpoint)
+	ep, err := unstructuredToDNSEndpoint(dnsEndpoint)
+	require.NoError(t, err, "Failed to convert unstructured to DNSEndpoint")
+
+	expectedSerial := generateConsistentSerial(ep)
 	t.Logf("Initial serial: %d, Expected new serial: %d", initialSerial, expectedSerial)
 
 	// Process as MODIFIED
-	plugin.processDNSEndpoint(dnsEndpoint, "MODIFIED")
+	plugin.processDNSEndpoint(t.Context(), dnsEndpoint, "MODIFIED")
 
 	// Verify atomic serial update
 	zone.RLock()

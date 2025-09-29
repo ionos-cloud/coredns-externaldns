@@ -148,6 +148,12 @@ Use the provided `Corefile.standalone` as a starting point:
         
         # Optional: set default TTL in seconds (default: 300)
         ttl 300
+        
+        # Optional: ConfigMap name for zone serial persistence (default: "coredns-externaldns-zone-serials")
+        # configmap_name my-custom-serials
+        
+        # Optional: ConfigMap namespace (default: same as plugin namespace or "default")
+        # configmap_namespace kube-system
     }
     
     # Forward queries not handled by externaldns to upstream DNS
@@ -164,6 +170,8 @@ When using the plugin with existing CoreDNS, add the externaldns block to your C
     externaldns {
         namespace my-namespace          # Optional: watch specific namespace only
         ttl 300                        # Optional: default TTL in seconds (default: 300)
+        configmap_name my-serials       # Optional: custom ConfigMap name
+        configmap_namespace kube-system # Optional: custom ConfigMap namespace
     }
     forward . 8.8.8.8
 }
@@ -173,6 +181,8 @@ When using the plugin with existing CoreDNS, add the externaldns block to your C
 
 - `namespace`: Kubernetes namespace to watch for DNSEndpoint resources. If not specified, watches all namespaces
 - `ttl`: Default TTL for DNS records in seconds (default: 300)
+- `configmap_name`: Name of the ConfigMap used to persist zone serials (default: "coredns-externaldns-zone-serials")
+- `configmap_namespace`: Namespace for the ConfigMap. If not specified, uses the same namespace as the plugin's `namespace` setting, or "default" if no namespace is configured
 
 **Note**: This plugin uses in-cluster service account authentication. Ensure proper RBAC permissions are configured.
 

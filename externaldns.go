@@ -2,9 +2,11 @@ package externaldns
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,12 +16,17 @@ import (
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/plugin/transfer"
 	"github.com/miekg/dns"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	coreclientv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
 	"sigs.k8s.io/external-dns/endpoint"
 )
 
@@ -35,10 +42,19 @@ type ExternalDNS struct {
 	ttl                   uint32
 	metricsUpdateInterval time.Duration
 
-	client dynamic.Interface
-	cache  *DNSCache
-	ctx    context.Context
-	cancel context.CancelFunc
+	client     dynamic.Interface
+	coreClient coreclientv1.CoreV1Interface
+	cache      *DNSCache
+	ctx        context.Context
+	cancel     context.CancelFunc
+	transfer   *transfer.Transfer
+
+	// Zone serial management
+	zoneSerials            map[string]uint32
+	serialsMutex           sync.RWMutex
+	configMapName          string
+	configMapNamespace     string
+	serialsResourceVersion string
 }
 
 // RecordRef represents a reference to a specific DNS record
@@ -130,8 +146,8 @@ func (c *DNSCache) metricsUpdateLoop() {
 // generateConsistentSerial produces a deterministic serial number based on creation timestamp and generation.
 // Ensures all CoreDNS instances generate the same serial for the same CR state.
 // Format: YYYYMMDDnn, where nn is derived from .metadata.generation.
-func generateConsistentSerial(obj *unstructured.Unstructured) uint32 {
-	t := obj.GetCreationTimestamp()
+func generateConsistentSerial(dnsEndpoint *externaldnsv1alpha1.DNSEndpoint) uint32 {
+	t := dnsEndpoint.GetCreationTimestamp()
 	if t.IsZero() {
 		// Fallback: use current time if creationTimestamp is unset
 		t = metav1.NewTime(time.Now())
@@ -139,7 +155,7 @@ func generateConsistentSerial(obj *unstructured.Unstructured) uint32 {
 
 	// Format date as YYYYMMDD and reserve two digits (nn) for generation
 	base := uint32(t.Year()*10000 + int(t.Month())*100 + t.Day())
-	serial := base*100 + uint32(obj.GetGeneration())
+	serial := base*100 + uint32(dnsEndpoint.GetGeneration())
 
 	return serial
 }
@@ -373,12 +389,12 @@ func (c *DNSCache) UpdateRecordsByEndpoint(endpointKey string, newRecords []Reco
 }
 
 // RemoveRecordsByEndpoint removes all records associated with a specific DNSEndpoint (used for deletions)
-func (c *DNSCache) RemoveRecordsByEndpoint(endpointKey string) {
+func (c *DNSCache) RemoveRecordsByEndpoint(endpointKey string) []RecordRef {
 	c.Lock()
 	recordRefs, exists := c.endpointRecords[endpointKey]
 	if !exists {
 		c.Unlock()
-		return
+		return nil
 	}
 
 	// Remove the endpoint tracking immediately to free memory
@@ -389,6 +405,8 @@ func (c *DNSCache) RemoveRecordsByEndpoint(endpointKey string) {
 
 	// Remove all records
 	c.removeSpecificRecords(recordRefs)
+
+	return recordRefs
 }
 
 // removeSpecificRecords removes only the specified records without updating zone serials
@@ -780,10 +798,8 @@ func (e *ExternalDNS) Serial(zone string) uint32 {
 	return serial
 }
 
-// handleAXFR handles AXFR (zone transfer) requests
-
 // Start starts watching DNSEndpoint resources
-func (e *ExternalDNS) Start() error {
+func (e *ExternalDNS) Start(ctx context.Context) error {
 	// Use in-cluster configuration (service account based)
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -795,11 +811,140 @@ func (e *ExternalDNS) Start() error {
 		return fmt.Errorf("failed to create kubernetes client: %v", err)
 	}
 
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes clientset: %v", err)
+	}
+	e.coreClient = clientset.CoreV1()
+
+	// Set default ConfigMap namespace if not configured
+	if e.configMapNamespace == "" {
+		e.configMapNamespace = e.namespace
+		if e.configMapNamespace == "" {
+			e.configMapNamespace = "default"
+		}
+	}
+
+	// Load existing zone serials from ConfigMap
+	if err := e.loadZoneSerials(ctx); err != nil {
+		return fmt.Errorf("failed to load zone serials: %v", err)
+	}
+
 	// Start watching DNSEndpoint resources
 	go e.watchDNSEndpoints()
 
 	log.Info("ExternalDNS plugin started with service account authentication")
 	return nil
+}
+
+// loadZoneSerials loads zone serials from ConfigMap
+func (e *ExternalDNS) loadZoneSerials(ctx context.Context) error {
+	if e.coreClient == nil {
+		// Not initialized, skip loading
+		e.serialsMutex.Lock()
+		if e.zoneSerials == nil {
+			e.zoneSerials = make(map[string]uint32)
+		}
+		e.serialsMutex.Unlock()
+		return nil
+	}
+
+	cm, err := e.coreClient.ConfigMaps(e.configMapNamespace).Get(ctx, e.configMapName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// Create empty ConfigMap
+			cm = &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      e.configMapName,
+					Namespace: e.configMapNamespace,
+				},
+				Data: map[string]string{},
+			}
+			cm, err = e.coreClient.ConfigMaps(e.configMapNamespace).Create(ctx, cm, metav1.CreateOptions{})
+			if err != nil {
+				// Handle race condition: another replica might have created it
+				if apierrors.IsAlreadyExists(err) {
+					// Try to get it again
+					cm, err = e.coreClient.ConfigMaps(e.configMapNamespace).Get(ctx, e.configMapName, metav1.GetOptions{})
+					if err != nil {
+						return fmt.Errorf("failed to get ConfigMap after creation conflict: %v", err)
+					}
+				} else {
+					return fmt.Errorf("failed to create ConfigMap: %v", err)
+				}
+			}
+		} else {
+			return fmt.Errorf("failed to get ConfigMap: %v", err)
+		}
+	}
+
+	e.serialsMutex.Lock()
+	e.zoneSerials = make(map[string]uint32)
+	for zone, serialStr := range cm.Data {
+		if serial, err := strconv.ParseUint(serialStr, 10, 32); err == nil {
+			e.zoneSerials[zone] = uint32(serial)
+			// Update cache with loaded serial
+			e.cache.updateZoneSerial(zone, uint32(serial))
+		} else {
+			log.Warningf("Invalid serial value for zone %s: %s", zone, serialStr)
+		}
+	}
+	e.serialsResourceVersion = cm.ResourceVersion
+	e.serialsMutex.Unlock()
+
+	log.Infof("Loaded %d zone serials from ConfigMap", len(e.zoneSerials))
+	return nil
+}
+
+// saveZoneSerials saves zone serials to ConfigMap
+func (e *ExternalDNS) saveZoneSerials(ctx context.Context) {
+	if e.coreClient == nil {
+		// Not initialized, skip saving (e.g., in tests)
+		return
+	}
+
+	e.serialsMutex.RLock()
+	data := make(map[string]string)
+	for zone, serial := range e.zoneSerials {
+		data[zone] = strconv.FormatUint(uint64(serial), 10)
+	}
+	rv := e.serialsResourceVersion
+	e.serialsMutex.RUnlock()
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            e.configMapName,
+			Namespace:       e.configMapNamespace,
+			ResourceVersion: rv,
+		},
+		Data: data,
+	}
+
+	_, err := e.coreClient.ConfigMaps(e.configMapNamespace).Update(ctx, cm, metav1.UpdateOptions{})
+	if err != nil {
+		if apierrors.IsConflict(err) {
+			log.Warningf("ConfigMap update conflict, reloading serials")
+			// Reload serials to get latest
+			if reloadErr := e.loadZoneSerials(ctx); reloadErr != nil {
+				log.Errorf("Failed to reload serials after conflict: %v", reloadErr)
+			}
+		} else {
+			log.Errorf("Failed to update ConfigMap: %v", err)
+		}
+
+		return
+	}
+
+	// Notify others
+	if e.transfer != nil {
+		for zone := range data {
+			if err := e.transfer.Notify(zone); err != nil {
+				log.Warningf("Failed to notify transfer of serial update for zone %s: %v", zone, err)
+			}
+		}
+	}
+
+	log.Debugf("Updated ConfigMap with %d zone serials", len(data))
 }
 
 // Stop stops the plugin
@@ -821,12 +966,7 @@ func (e *ExternalDNS) watchDNSEndpoints() {
 		Resource: "dnsendpoints",
 	}
 
-	var resourceInterface dynamic.ResourceInterface
-	if e.namespace != "" {
-		resourceInterface = e.client.Resource(dnsEndpointGVR).Namespace(e.namespace)
-	} else {
-		resourceInterface = e.client.Resource(dnsEndpointGVR)
-	}
+	resourceInterface := e.client.Resource(dnsEndpointGVR).Namespace(e.namespace)
 
 	// Initial sync - get all existing DNSEndpoints
 	list, err := resourceInterface.List(e.ctx, metav1.ListOptions{})
@@ -837,7 +977,7 @@ func (e *ExternalDNS) watchDNSEndpoints() {
 
 	log.Infof("Initial sync: found %d DNSEndpoints", len(list.Items))
 	for _, item := range list.Items {
-		e.processDNSEndpoint(&item, "ADDED")
+		e.processDNSEndpoint(e.ctx, &item, "ADDED")
 	}
 
 	// Start watching for changes
@@ -869,37 +1009,46 @@ func (e *ExternalDNS) watchDNSEndpoints() {
 			}
 
 			if obj, ok := event.Object.(*unstructured.Unstructured); ok {
-				e.processDNSEndpoint(obj, string(event.Type))
+				e.processDNSEndpoint(e.ctx, obj, string(event.Type))
 			}
 		}
 	}
 }
 
+func unstructuredToDNSEndpoint(obj *unstructured.Unstructured) (*externaldnsv1alpha1.DNSEndpoint, error) {
+	b, err := obj.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	var dnsEndpoint externaldnsv1alpha1.DNSEndpoint
+	err = json.Unmarshal(b, &dnsEndpoint)
+	return &dnsEndpoint, err
+}
+
 // processDNSEndpoint processes a DNSEndpoint object
-func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventType string) {
+func (e *ExternalDNS) processDNSEndpoint(ctx context.Context, obj *unstructured.Unstructured, eventType string) {
 	log.Debugf("Processing DNSEndpoint %s/%s (event: %s)",
 		obj.GetNamespace(), obj.GetName(), eventType)
 
+	dnsEndpoint, err := unstructuredToDNSEndpoint(obj)
+	if err != nil {
+		log.Errorf("Failed to convert to DNSEndpoint: %v", err)
+		return
+	}
+
 	// Generate consistent serial number based on CR metadata
 	// This ensures all CoreDNS instances generate the same serial for the same CR state
-	consistentSerial := generateConsistentSerial(obj)
+	consistentSerial := generateConsistentSerial(dnsEndpoint)
 	log.Debugf("Generated consistent serial %d for DNSEndpoint %s/%s (resourceVersion: %s, generation: %d)",
-		consistentSerial, obj.GetNamespace(), obj.GetName(), obj.GetResourceVersion(), obj.GetGeneration())
+		consistentSerial, dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), dnsEndpoint.GetResourceVersion(), dnsEndpoint.GetGeneration())
 
 	// Check for PTR record creation annotation
 	createPTR := false
-	if annotations := obj.GetAnnotations(); annotations != nil {
+	if annotations := dnsEndpoint.GetAnnotations(); annotations != nil {
 		if val, exists := annotations["coredns-externaldns.ionos.cloud/create-ptr"]; exists {
 			createPTR = (val == "true" || val == "1")
 		}
-	}
-
-	// Extract endpoints from the object
-	endpoints, err := e.extractEndpoints(obj)
-	if err != nil {
-		log.Errorf("Failed to extract endpoints from %s/%s: %v",
-			obj.GetNamespace(), obj.GetName(), err)
-		return
 	}
 
 	// Increment endpoint event metric
@@ -907,28 +1056,28 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 
 	switch eventType {
 	case "ADDED":
-		endpointKey := fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName())
+		endpointKey := fmt.Sprintf("%s/%s", dnsEndpoint.GetNamespace(), dnsEndpoint.GetName())
 
 		// For new endpoints, add records without serial updates during processing
 		var addedRecordRefs []RecordRef
-		for _, ep := range endpoints {
+		for _, ep := range dnsEndpoint.Spec.Endpoints {
 			refs := e.addEndpointToCache(ep, createPTR, endpointKey)
 			addedRecordRefs = append(addedRecordRefs, refs...)
 		}
 
 		// Update zone serials ONCE at the end for all affected zones
-		e.updateZoneSerialsForRecords(addedRecordRefs, consistentSerial)
+		e.updateZoneSerialsForRecords(ctx, addedRecordRefs, consistentSerial)
 
 		log.Debugf("Added cache with %d endpoints from %s/%s (createPTR: %v, serial: %d)",
-			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR, consistentSerial)
+			len(dnsEndpoint.Spec.Endpoints), dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), createPTR, consistentSerial)
 
 	case "MODIFIED":
-		endpointKey := fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName())
+		endpointKey := fmt.Sprintf("%s/%s", dnsEndpoint.GetNamespace(), dnsEndpoint.GetName())
 
 		// For modifications, we need to be careful about DNS availability
 		// First collect what records SHOULD exist (without adding them yet)
 		var newRecordRefs []RecordRef
-		for _, ep := range endpoints {
+		for _, ep := range dnsEndpoint.Spec.Endpoints {
 			refs := e.collectRecordRefs(ep, createPTR)
 			newRecordRefs = append(newRecordRefs, refs...)
 		}
@@ -942,65 +1091,22 @@ func (e *ExternalDNS) processDNSEndpoint(obj *unstructured.Unstructured, eventTy
 
 		// Update zone serials ONCE at the end for all affected zones
 		// This ensures slaves see atomic updates and don't request AXFR mid-processing
-		e.updateZoneSerialsForRecords(newRecordRefs, consistentSerial)
+		e.updateZoneSerialsForRecords(ctx, newRecordRefs, consistentSerial)
 
 		log.Debugf("Modified cache with %d endpoints from %s/%s (createPTR: %v, serial: %d)",
-			len(endpoints), obj.GetNamespace(), obj.GetName(), createPTR, consistentSerial)
+			len(dnsEndpoint.Spec.Endpoints), dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), createPTR, consistentSerial)
 
 	case "DELETED":
 		// Remove all records for this DNSEndpoint
-		e.clearDNSEndpointRecords(obj.GetNamespace(), obj.GetName())
+		endpointKey := fmt.Sprintf("%s/%s", dnsEndpoint.GetNamespace(), dnsEndpoint.GetName())
+		deletedRecords := e.cache.RemoveRecordsByEndpoint(endpointKey)
 
-		log.Debugf("Removed endpoints from %s/%s",
-			obj.GetNamespace(), obj.GetName())
+		// Update zone serials ONCE at the end for all affected zones
+		e.updateZoneSerialsForRecords(ctx, deletedRecords, consistentSerial)
+
+		log.Debugf("Removed %d records for deleted DNSEndpoint %s/%s",
+			len(deletedRecords), dnsEndpoint.GetNamespace(), dnsEndpoint.GetName())
 	}
-}
-
-// extractEndpoints extracts endpoint.Endpoint objects from unstructured data
-func (e *ExternalDNS) extractEndpoints(obj *unstructured.Unstructured) ([]*endpoint.Endpoint, error) {
-	spec, found, err := unstructured.NestedMap(obj.Object, "spec")
-	if err != nil || !found {
-		return nil, fmt.Errorf("spec not found in DNSEndpoint")
-	}
-
-	endpointsRaw, found, err := unstructured.NestedSlice(spec, "endpoints")
-	if err != nil || !found {
-		return nil, fmt.Errorf("endpoints not found in DNSEndpoint spec")
-	}
-
-	var endpoints []*endpoint.Endpoint
-	for _, epRaw := range endpointsRaw {
-		epMap, ok := epRaw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		ep := &endpoint.Endpoint{}
-
-		// Extract DNS name
-		if dnsName, found, _ := unstructured.NestedString(epMap, "dnsName"); found {
-			ep.DNSName = dnsName
-		}
-
-		// Extract record type
-		if recordType, found, _ := unstructured.NestedString(epMap, "recordType"); found {
-			ep.RecordType = recordType
-		}
-
-		// Extract TTL
-		if ttl, found, _ := unstructured.NestedInt64(epMap, "recordTTL"); found {
-			ep.RecordTTL = endpoint.TTL(ttl)
-		}
-
-		// Extract targets
-		if targets, found, _ := unstructured.NestedStringSlice(epMap, "targets"); found {
-			ep.Targets = targets
-		}
-
-		endpoints = append(endpoints, ep)
-	}
-
-	return endpoints, nil
 }
 
 // addEndpointToCache adds an endpoint to the DNS cache without updating serials
@@ -1130,18 +1236,32 @@ func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) [
 }
 
 // updateZoneSerialsForRecords updates the serial for all zones affected by the given records
-func (e *ExternalDNS) updateZoneSerialsForRecords(records []RecordRef, serial uint32) {
+func (e *ExternalDNS) updateZoneSerialsForRecords(ctx context.Context, records []RecordRef, proposedSerial uint32) {
 	// Collect unique zones from the records
 	affectedZones := make(map[string]bool)
 	for _, ref := range records {
 		affectedZones[ref.Zone] = true
 	}
 
-	// Update serial for each affected zone
-	for zoneName := range affectedZones {
-		e.cache.updateZoneSerial(zoneName, serial)
-		log.Debugf("Updated serial for zone %s to %d (atomic endpoint update)", zoneName, serial)
+	e.serialsMutex.Lock()
+	// Initialize map if not already done
+	if e.zoneSerials == nil {
+		e.zoneSerials = make(map[string]uint32)
 	}
+
+	for zoneName := range affectedZones {
+		if proposedSerial > e.zoneSerials[zoneName] {
+			// Use the proposed serial if it's higher
+			e.zoneSerials[zoneName] = proposedSerial
+		} else {
+			e.zoneSerials[zoneName]++
+		}
+		e.cache.updateZoneSerial(zoneName, e.zoneSerials[zoneName])
+		log.Debugf("Updated serial for zone %s to %d (new high serial)", zoneName, e.zoneSerials[zoneName])
+	}
+	e.serialsMutex.Unlock()
+
+	go e.saveZoneSerials(ctx)
 }
 
 // addRecordFromRef adds a single record to the cache based on a RecordRef
@@ -1371,11 +1491,4 @@ func (e *ExternalDNS) createReverseDNSName(ipAddr string) string {
 	}
 
 	return ""
-}
-
-// clearDNSEndpointRecords removes all records associated with a DNSEndpoint
-func (e *ExternalDNS) clearDNSEndpointRecords(namespace, name string) {
-	endpointKey := fmt.Sprintf("%s/%s", namespace, name)
-	e.cache.RemoveRecordsByEndpoint(endpointKey)
-	log.Debugf("Cleared records for DNSEndpoint %s", endpointKey)
 }

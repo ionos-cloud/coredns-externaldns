@@ -59,7 +59,7 @@ func TestClearDNSEndpointRecords(t *testing.T) {
 	require.Len(t, e.cache.endpointRecords["default/endpoint2"], 1, "Expected 1 tracked record for default/endpoint2")
 
 	// Clear records for endpoint1
-	e.clearDNSEndpointRecords("default", "endpoint1")
+	e.cache.RemoveRecordsByEndpoint("default/endpoint1")
 
 	// Verify endpoint1 records were removed
 	records1After := e.cache.GetRecords("test1.example.com.", dns.TypeA)
@@ -109,7 +109,7 @@ func TestClearDNSEndpointRecordsWithPTR(t *testing.T) {
 	require.Len(t, e.cache.endpointRecords["default/ptr-endpoint"], 2, "Expected 2 tracked records (A + PTR)")
 
 	// Clear the endpoint
-	e.clearDNSEndpointRecords("default", "ptr-endpoint")
+	e.cache.RemoveRecordsByEndpoint("default/ptr-endpoint")
 
 	// Verify both A and PTR records were removed
 	aRecordsAfter := e.cache.GetRecords("test.example.com.", dns.TypeA)
