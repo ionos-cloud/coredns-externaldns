@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/external-dns/endpoint"
 )
 
@@ -46,14 +47,10 @@ func TestDifferentialUpdate(t *testing.T) {
 
 	// Verify initial state
 	appRecords := e.cache.GetRecords("app.example.com.", dns.TypeA)
-	if len(appRecords) != 2 {
-		t.Fatalf("Expected 2 A records for app.example.com, got %d", len(appRecords))
-	}
+	require.Len(t, appRecords, 2, "Expected 2 A records for app.example.com")
 
 	apiRecords := e.cache.GetRecords("api.example.com.", dns.TypeA)
-	if len(apiRecords) != 1 {
-		t.Fatalf("Expected 1 A record for api.example.com, got %d", len(apiRecords))
-	}
+	require.Len(t, apiRecords, 1, "Expected 1 A record for api.example.com")
 
 	// Now simulate a MODIFIED event: Change app.example.com targets and remove api.example.com
 	modifiedEp1 := &endpoint.Endpoint{
@@ -83,9 +80,7 @@ func TestDifferentialUpdate(t *testing.T) {
 
 	// app.example.com should have 2 records: .1 and .3
 	appRecordsAfter := e.cache.GetRecords("app.example.com.", dns.TypeA)
-	if len(appRecordsAfter) != 2 {
-		t.Fatalf("Expected 2 A records for app.example.com after update, got %d", len(appRecordsAfter))
-	}
+	require.Len(t, appRecordsAfter, 2, "Expected 2 A records for app.example.com after update")
 
 	// Check that we have .1 and .3, not .2
 	hasOne := false
@@ -106,32 +101,20 @@ func TestDifferentialUpdate(t *testing.T) {
 		}
 	}
 
-	if !hasOne {
-		t.Error("Expected to keep 192.168.1.1 record")
-	}
-	if hasTwo {
-		t.Error("Expected to remove 192.168.1.2 record")
-	}
-	if !hasThree {
-		t.Error("Expected to add 192.168.1.3 record")
-	}
+	require.True(t, hasOne, "Expected to keep 192.168.1.1 record")
+	require.False(t, hasTwo, "Expected to remove 192.168.1.2 record")
+	require.True(t, hasThree, "Expected to add 192.168.1.3 record")
 
 	// api.example.com should be completely removed
 	apiRecordsAfter := e.cache.GetRecords("api.example.com.", dns.TypeA)
-	if len(apiRecordsAfter) != 0 {
-		t.Fatalf("Expected 0 A records for api.example.com after update, got %d", len(apiRecordsAfter))
-	}
+	require.Len(t, apiRecordsAfter, 0, "Expected 0 A records for api.example.com after update")
 
 	// web.example.com should be added
 	webRecords := e.cache.GetRecords("web.example.com.", dns.TypeCNAME)
-	if len(webRecords) != 1 {
-		t.Fatalf("Expected 1 CNAME record for web.example.com, got %d", len(webRecords))
-	}
+	require.Len(t, webRecords, 1, "Expected 1 CNAME record for web.example.com")
 
 	// Verify tracking is updated correctly
-	if len(e.cache.endpointRecords[endpointKey]) != len(newRefs) {
-		t.Fatalf("Expected %d tracked records, got %d", len(newRefs), len(e.cache.endpointRecords[endpointKey]))
-	}
+	require.Len(t, e.cache.endpointRecords[endpointKey], len(newRefs), "Expected tracked records to match newRefs")
 }
 
 func TestContinuousAvailabilityDuringUpdate(t *testing.T) {
@@ -156,9 +139,7 @@ func TestContinuousAvailabilityDuringUpdate(t *testing.T) {
 
 	// Verify initial state
 	records := e.cache.GetRecords("service.example.com.", dns.TypeA)
-	if len(records) != 1 {
-		t.Fatalf("Expected 1 A record initially, got %d", len(records))
-	}
+	require.Len(t, records, 1, "Expected 1 A record initially")
 
 	// Create modified endpoint with same name but different target
 	modifiedEp := &endpoint.Endpoint{
@@ -173,25 +154,19 @@ func TestContinuousAvailabilityDuringUpdate(t *testing.T) {
 
 	// At this point, both records should exist temporarily
 	recordsDuringUpdate := e.cache.GetRecords("service.example.com.", dns.TypeA)
-	if len(recordsDuringUpdate) != 2 {
-		t.Fatalf("Expected 2 A records during update (old + new), got %d", len(recordsDuringUpdate))
-	}
+	require.Len(t, recordsDuringUpdate, 2, "Expected 2 A records during update (old + new)")
 
 	// Now perform differential update (removes old, keeps new)
 	e.cache.UpdateRecordsByEndpoint(endpointKey, newRefs)
 
 	// After update, should only have the new record
 	recordsAfter := e.cache.GetRecords("service.example.com.", dns.TypeA)
-	if len(recordsAfter) != 1 {
-		t.Fatalf("Expected 1 A record after update, got %d", len(recordsAfter))
-	}
+	require.Len(t, recordsAfter, 1, "Expected 1 A record after update")
 
 	// Verify it's the new record
 	if aRecord, ok := recordsAfter[0].(*dns.A); ok {
-		if aRecord.A.String() != "192.168.1.200" {
-			t.Errorf("Expected new record 192.168.1.200, got %s", aRecord.A.String())
-		}
+		require.Equal(t, "192.168.1.200", aRecord.A.String(), "Expected new record to match")
 	} else {
-		t.Error("Expected A record type")
+		require.Fail(t, "Expected A record type")
 	}
 }

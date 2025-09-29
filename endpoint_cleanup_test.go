@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/external-dns/endpoint"
 )
 
@@ -44,57 +45,38 @@ func TestClearDNSEndpointRecords(t *testing.T) {
 
 	// Verify records were added
 	records1 := e.cache.GetRecords("test1.example.com.", dns.TypeA)
-	if len(records1) != 2 {
-		t.Fatalf("Expected 2 A records for test1.example.com, got %d", len(records1))
-	}
+	require.Len(t, records1, 2, "Expected 2 A records for test1.example.com")
 
 	records2 := e.cache.GetRecords("test2.example.com.", dns.TypeA)
-	if len(records2) != 1 {
-		t.Fatalf("Expected 1 A record for test2.example.com, got %d", len(records2))
-	}
+	require.Len(t, records2, 1, "Expected 1 A record for test2.example.com")
 
 	records3 := e.cache.GetRecords("test3.example.com.", dns.TypeCNAME)
-	if len(records3) != 1 {
-		t.Fatalf("Expected 1 CNAME record for test3.example.com, got %d", len(records3))
-	}
+	require.Len(t, records3, 1, "Expected 1 CNAME record for test3.example.com")
 
 	// Verify endpoint tracking
-	if len(e.cache.endpointRecords["default/endpoint1"]) != 3 { // 2 A records + 1 CNAME record
-		t.Fatalf("Expected 3 tracked records for default/endpoint1, got %d", len(e.cache.endpointRecords["default/endpoint1"]))
-	}
+	require.Len(t, e.cache.endpointRecords["default/endpoint1"], 3, "Expected 3 tracked records for default/endpoint1")
 
-	if len(e.cache.endpointRecords["default/endpoint2"]) != 1 { // 1 A record
-		t.Fatalf("Expected 1 tracked record for default/endpoint2, got %d", len(e.cache.endpointRecords["default/endpoint2"]))
-	}
+	require.Len(t, e.cache.endpointRecords["default/endpoint2"], 1, "Expected 1 tracked record for default/endpoint2")
 
 	// Clear records for endpoint1
 	e.clearDNSEndpointRecords("default", "endpoint1")
 
 	// Verify endpoint1 records were removed
 	records1After := e.cache.GetRecords("test1.example.com.", dns.TypeA)
-	if len(records1After) != 0 {
-		t.Fatalf("Expected 0 A records for test1.example.com after cleanup, got %d", len(records1After))
-	}
+	require.Len(t, records1After, 0, "Expected 0 A records for test1.example.com after cleanup")
 
 	records3After := e.cache.GetRecords("test3.example.com.", dns.TypeCNAME)
-	if len(records3After) != 0 {
-		t.Fatalf("Expected 0 CNAME records for test3.example.com after cleanup, got %d", len(records3After))
-	}
+	require.Len(t, records3After, 0, "Expected 0 CNAME records for test3.example.com after cleanup")
 
 	// Verify endpoint2 records are still there
 	records2After := e.cache.GetRecords("test2.example.com.", dns.TypeA)
-	if len(records2After) != 1 {
-		t.Fatalf("Expected 1 A record for test2.example.com after cleanup, got %d", len(records2After))
-	}
+	require.Len(t, records2After, 1, "Expected 1 A record for test2.example.com after cleanup")
 
 	// Verify endpoint tracking was cleaned up
-	if _, exists := e.cache.endpointRecords["default/endpoint1"]; exists {
-		t.Fatal("Expected default/endpoint1 to be removed from tracking")
-	}
+	_, exists := e.cache.endpointRecords["default/endpoint1"]
+	require.False(t, exists, "Expected default/endpoint1 to be removed from tracking")
 
-	if len(e.cache.endpointRecords["default/endpoint2"]) != 1 {
-		t.Fatalf("Expected 1 tracked record for default/endpoint2 after cleanup, got %d", len(e.cache.endpointRecords["default/endpoint2"]))
-	}
+	require.Len(t, e.cache.endpointRecords["default/endpoint2"], 1, "Expected 1 tracked record for default/endpoint2 after cleanup")
 }
 
 func TestClearDNSEndpointRecordsWithPTR(t *testing.T) {
@@ -117,37 +99,26 @@ func TestClearDNSEndpointRecordsWithPTR(t *testing.T) {
 
 	// Verify A record was added
 	aRecords := e.cache.GetRecords("test.example.com.", dns.TypeA)
-	if len(aRecords) != 1 {
-		t.Fatalf("Expected 1 A record, got %d", len(aRecords))
-	}
+	require.Len(t, aRecords, 1, "Expected 1 A record")
 
 	// Verify PTR record was added
 	ptrRecords := e.cache.GetRecords("10.1.168.192.in-addr.arpa.", dns.TypePTR)
-	if len(ptrRecords) != 1 {
-		t.Fatalf("Expected 1 PTR record, got %d", len(ptrRecords))
-	}
+	require.Len(t, ptrRecords, 1, "Expected 1 PTR record")
 
 	// Verify endpoint tracking includes both records
-	if len(e.cache.endpointRecords["default/ptr-endpoint"]) != 2 {
-		t.Fatalf("Expected 2 tracked records (A + PTR), got %d", len(e.cache.endpointRecords["default/ptr-endpoint"]))
-	}
+	require.Len(t, e.cache.endpointRecords["default/ptr-endpoint"], 2, "Expected 2 tracked records (A + PTR)")
 
 	// Clear the endpoint
 	e.clearDNSEndpointRecords("default", "ptr-endpoint")
 
 	// Verify both A and PTR records were removed
 	aRecordsAfter := e.cache.GetRecords("test.example.com.", dns.TypeA)
-	if len(aRecordsAfter) != 0 {
-		t.Fatalf("Expected 0 A records after cleanup, got %d", len(aRecordsAfter))
-	}
+	require.Len(t, aRecordsAfter, 0, "Expected 0 A records after cleanup")
 
 	ptrRecordsAfter := e.cache.GetRecords("10.1.168.192.in-addr.arpa.", dns.TypePTR)
-	if len(ptrRecordsAfter) != 0 {
-		t.Fatalf("Expected 0 PTR records after cleanup, got %d", len(ptrRecordsAfter))
-	}
+	require.Len(t, ptrRecordsAfter, 0, "Expected 0 PTR records after cleanup")
 
 	// Verify endpoint tracking was cleaned up
-	if _, exists := e.cache.endpointRecords["default/ptr-endpoint"]; exists {
-		t.Fatal("Expected default/ptr-endpoint to be removed from tracking")
-	}
+	_, exists := e.cache.endpointRecords["default/ptr-endpoint"]
+	require.False(t, exists, "Expected default/ptr-endpoint to be removed from tracking")
 }

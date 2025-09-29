@@ -7,6 +7,7 @@ require (
 	github.com/coredns/coredns v1.12.4
 	github.com/miekg/dns v1.1.68
 	github.com/prometheus/client_golang v1.23.2
+	github.com/stretchr/testify v1.11.1
 	k8s.io/apimachinery v0.34.1
 	k8s.io/client-go v0.34.1
 	sigs.k8s.io/external-dns v0.19.0

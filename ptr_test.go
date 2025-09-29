@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCreateReverseDNSName(t *testing.T) {
@@ -40,9 +41,7 @@ func TestCreateReverseDNSName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := e.createReverseDNSName(tt.input)
-			if result != tt.expected {
-				t.Errorf("createReverseDNSName(%s) = %s, want %s", tt.input, result, tt.expected)
-			}
+			require.Equal(t, tt.expected, result, "createReverseDNSName(%s)", tt.input)
 		})
 	}
 }
@@ -63,22 +62,13 @@ func TestCreateAndAddPTRRecord(t *testing.T) {
 	ptrName := "10.1.168.192.in-addr.arpa."
 	records := e.cache.GetRecords(ptrName, dns.TypePTR)
 
-	if len(records) != 1 {
-		t.Fatalf("Expected 1 PTR record, got %d", len(records))
-	}
+	require.Len(t, records, 1, "Expected 1 PTR record")
 
 	ptrRecord, ok := records[0].(*dns.PTR)
-	if !ok {
-		t.Fatalf("Expected PTR record, got %T", records[0])
-	}
+	require.True(t, ok, "Expected PTR record type")
 
-	if ptrRecord.Ptr != dns.Fqdn(hostname) {
-		t.Errorf("Expected PTR target %s, got %s", dns.Fqdn(hostname), ptrRecord.Ptr)
-	}
-
-	if ptrRecord.Hdr.Ttl != ttl {
-		t.Errorf("Expected TTL %d, got %d", ttl, ptrRecord.Hdr.Ttl)
-	}
+	require.Equal(t, dns.Fqdn(hostname), ptrRecord.Ptr, "Expected PTR target to match")
+	require.Equal(t, ttl, ptrRecord.Hdr.Ttl, "Expected TTL to match")
 }
 
 func TestPTRRecordCreationForIPv6(t *testing.T) {
@@ -97,16 +87,8 @@ func TestPTRRecordCreationForIPv6(t *testing.T) {
 	ptrName := "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."
 	records := e.cache.GetRecords(ptrName, dns.TypePTR)
 
-	if len(records) != 1 {
-		t.Fatalf("Expected 1 PTR record, got %d", len(records))
-	}
-
+	require.Len(t, records, 1, "Expected 1 PTR record")
 	ptrRecord, ok := records[0].(*dns.PTR)
-	if !ok {
-		t.Fatalf("Expected PTR record, got %T", records[0])
-	}
-
-	if ptrRecord.Ptr != dns.Fqdn(hostname) {
-		t.Errorf("Expected PTR target %s, got %s", dns.Fqdn(hostname), ptrRecord.Ptr)
-	}
+	require.True(t, ok, "Expected PTR record type")
+	require.Equal(t, dns.Fqdn(hostname), ptrRecord.Ptr, "Expected PTR target to match")
 }

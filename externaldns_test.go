@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDNSCache(t *testing.T) {
@@ -26,26 +27,18 @@ func TestDNSCache(t *testing.T) {
 	cache.AddRecord("test.example.com", dns.TypeA, aRecord)
 	records := cache.GetRecords("test.example.com", dns.TypeA)
 
-	if len(records) != 1 {
-		t.Errorf("Expected 1 record, got %d", len(records))
-	}
+	require.Len(t, records, 1, "Expected 1 record")
 
-	if records[0].(*dns.A).A.String() != "192.168.1.1" {
-		t.Errorf("Expected 192.168.1.1, got %s", records[0].(*dns.A).A.String())
-	}
+	require.Equal(t, "192.168.1.1", records[0].(*dns.A).A.String(), "A record IP should match")
 
 	// Test case insensitive lookup
 	records = cache.GetRecords("TEST.EXAMPLE.COM", dns.TypeA)
-	if len(records) != 1 {
-		t.Errorf("Case insensitive lookup failed, expected 1 record, got %d", len(records))
-	}
+	require.Len(t, records, 1, "Case insensitive lookup should return 1 record")
 
 	// Test removing records
 	cache.RemoveRecord("test.example.com", dns.TypeA, "192.168.1.1")
 	records = cache.GetRecords("test.example.com", dns.TypeA)
-	if len(records) != 0 {
-		t.Errorf("Expected 0 records after removal, got %d", len(records))
-	}
+	require.Len(t, records, 0, "Expected 0 records after removal")
 }
 
 func TestRecordTypeToQType(t *testing.T) {
@@ -69,9 +62,7 @@ func TestRecordTypeToQType(t *testing.T) {
 
 	for _, test := range tests {
 		result := ed.recordTypeToQType(test.recordType)
-		if result != test.expected {
-			t.Errorf("recordTypeToQType(%s) = %d, expected %d", test.recordType, result, test.expected)
-		}
+		require.Equal(t, test.expected, result, "recordTypeToQType(%s)", test.recordType)
 	}
 }
 
@@ -80,45 +71,25 @@ func TestCreateDNSRecord(t *testing.T) {
 
 	// Test A record creation
 	rr := ed.createDNSRecord("test.example.com", dns.TypeA, 300, "192.168.1.1")
-	if rr == nil {
-		t.Fatal("Expected A record, got nil")
-	}
+	require.NotNil(t, rr, "Expected A record")
 	aRecord, ok := rr.(*dns.A)
-	if !ok {
-		t.Fatal("Expected *dns.A type")
-	}
-	if aRecord.A.String() != "192.168.1.1" {
-		t.Errorf("Expected 192.168.1.1, got %s", aRecord.A.String())
-	}
+	require.True(t, ok, "Expected *dns.A type")
+	require.Equal(t, "192.168.1.1", aRecord.A.String(), "A record IP should match")
 
 	// Test CNAME record creation
 	rr = ed.createDNSRecord("www.example.com", dns.TypeCNAME, 300, "example.com")
-	if rr == nil {
-		t.Fatal("Expected CNAME record, got nil")
-	}
+	require.NotNil(t, rr, "Expected CNAME record")
 	cnameRecord, ok := rr.(*dns.CNAME)
-	if !ok {
-		t.Fatal("Expected *dns.CNAME type")
-	}
-	if cnameRecord.Target != "example.com." {
-		t.Errorf("Expected example.com., got %s", cnameRecord.Target)
-	}
+	require.True(t, ok, "Expected *dns.CNAME type")
+	require.Equal(t, "example.com.", cnameRecord.Target, "CNAME target should match")
 
 	// Test MX record creation
 	rr = ed.createDNSRecord("example.com", dns.TypeMX, 300, "10 mail.example.com")
-	if rr == nil {
-		t.Fatal("Expected MX record, got nil")
-	}
+	require.NotNil(t, rr, "Expected MX record")
 	mxRecord, ok := rr.(*dns.MX)
-	if !ok {
-		t.Fatal("Expected *dns.MX type")
-	}
-	if mxRecord.Preference != 10 {
-		t.Errorf("Expected preference 10, got %d", mxRecord.Preference)
-	}
-	if mxRecord.Mx != "mail.example.com." {
-		t.Errorf("Expected mail.example.com., got %s", mxRecord.Mx)
-	}
+	require.True(t, ok, "Expected *dns.MX type")
+	require.Equal(t, uint16(10), mxRecord.Preference, "MX preference should match")
+	require.Equal(t, "mail.example.com.", mxRecord.Mx, "MX host should match")
 }
 
 func TestRecordMatches(t *testing.T) {
@@ -135,13 +106,9 @@ func TestRecordMatches(t *testing.T) {
 		A: net.ParseIP("192.168.1.1"),
 	}
 
-	if !cache.recordMatches(aRecord, "192.168.1.1") {
-		t.Error("A record should match IP address")
-	}
+	require.True(t, cache.recordMatches(aRecord, "192.168.1.1"), "A record should match IP address")
 
-	if cache.recordMatches(aRecord, "192.168.1.2") {
-		t.Error("A record should not match different IP address")
-	}
+	require.False(t, cache.recordMatches(aRecord, "192.168.1.2"), "A record should not match different IP address")
 
 	// Test CNAME record matching
 	cnameRecord := &dns.CNAME{
@@ -154,13 +121,9 @@ func TestRecordMatches(t *testing.T) {
 		Target: "example.com.",
 	}
 
-	if !cache.recordMatches(cnameRecord, "example.com.") {
-		t.Error("CNAME record should match target")
-	}
+	require.True(t, cache.recordMatches(cnameRecord, "example.com."), "CNAME record should match target")
 
-	if cache.recordMatches(cnameRecord, "other.com.") {
-		t.Error("CNAME record should not match different target")
-	}
+	require.False(t, cache.recordMatches(cnameRecord, "other.com."), "CNAME record should not match different target")
 }
 
 func TestServeDNS(t *testing.T) {
@@ -184,24 +147,16 @@ func TestServeDNS(t *testing.T) {
 
 	// Test that records were added to cache
 	records := ed.cache.GetRecords("test.example.com", dns.TypeA)
-	if len(records) != 1 {
-		t.Errorf("Expected 1 record in cache, got %d", len(records))
-	}
+	require.Len(t, records, 1, "Expected 1 record in cache")
 
-	if records[0].(*dns.A).A.String() != "192.168.1.1" {
-		t.Errorf("Expected 192.168.1.1 in cache, got %s", records[0].(*dns.A).A.String())
-	}
+	require.Equal(t, "192.168.1.1", records[0].(*dns.A).A.String(), "Cached A record should match")
 
 	// Test cache size
 	cacheSize := ed.cache.GetCacheSize()
-	if cacheSize != 1 {
-		t.Errorf("Expected cache size 1, got %d", cacheSize)
-	}
+	require.Equal(t, 1, cacheSize, "Cache size should be 1")
 
 	// Test Name method
-	if ed.Name() != "externaldns" {
-		t.Errorf("Expected plugin name 'externaldns', got %s", ed.Name())
-	}
+	require.Equal(t, "externaldns", ed.Name(), "Plugin name should be externaldns")
 }
 
 // TestCacheMetrics tests that cache size metrics are properly updated
@@ -210,9 +165,7 @@ func TestCacheMetrics(t *testing.T) {
 	defer cache.Stop() // Cleanup background goroutine
 
 	// Initial cache should be empty
-	if cache.GetCacheSize() != 0 {
-		t.Errorf("Expected empty cache, got size %d", cache.GetCacheSize())
-	}
+	require.Equal(t, 0, cache.GetCacheSize(), "Expected empty cache")
 
 	// Add some records
 	aRecord1 := &dns.A{
@@ -246,31 +199,21 @@ func TestCacheMetrics(t *testing.T) {
 	}
 
 	cache.AddRecord("test1.example.com", dns.TypeA, aRecord1)
-	if cache.GetCacheSize() != 1 {
-		t.Errorf("Expected cache size 1, got %d", cache.GetCacheSize())
-	}
+	require.Equal(t, 1, cache.GetCacheSize(), "Cache size should be 1")
 
 	cache.AddRecord("test2.example.com", dns.TypeA, aRecord2)
-	if cache.GetCacheSize() != 2 {
-		t.Errorf("Expected cache size 2, got %d", cache.GetCacheSize())
-	}
+	require.Equal(t, 2, cache.GetCacheSize(), "Cache size should be 2")
 
 	cache.AddRecord("www.example.com", dns.TypeCNAME, cnameRecord)
-	if cache.GetCacheSize() != 3 {
-		t.Errorf("Expected cache size 3, got %d", cache.GetCacheSize())
-	}
+	require.Equal(t, 3, cache.GetCacheSize(), "Cache size should be 3")
 
 	// Remove a record
 	cache.RemoveRecord("test1.example.com", dns.TypeA, "192.168.1.1")
-	if cache.GetCacheSize() != 2 {
-		t.Errorf("Expected cache size 2 after removal, got %d", cache.GetCacheSize())
-	}
+	require.Equal(t, 2, cache.GetCacheSize(), "Cache size should be 2 after removal")
 
 	// Clear all records for a domain
 	cache.ClearRecords("test2.example.com")
-	if cache.GetCacheSize() != 1 {
-		t.Errorf("Expected cache size 1 after clearing domain, got %d", cache.GetCacheSize())
-	}
+	require.Equal(t, 1, cache.GetCacheSize(), "Cache size should be 1 after clearing domain")
 }
 
 // TestBackgroundMetricsUpdate tests that the background metrics update goroutine works
@@ -296,9 +239,7 @@ func TestBackgroundMetricsUpdate(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Verify the cache has the record
-	if cache.GetCacheSize() != 1 {
-		t.Errorf("Expected cache size 1, got %d", cache.GetCacheSize())
-	}
+	require.Equal(t, 1, cache.GetCacheSize(), "Cache size should be 1")
 }
 
 // TestZoneMetrics tests that metrics include zone labels correctly
@@ -335,9 +276,7 @@ func TestZoneMetrics(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Verify we have records in different zones
-	if cache.GetCacheSize() != 2 {
-		t.Errorf("Expected cache size 2, got %d", cache.GetCacheSize())
-	}
+	require.Equal(t, 2, cache.GetCacheSize(), "Cache size should be 2")
 
 	// The metrics should now be reported per-zone
 	// This test mainly verifies that the code runs without errors
@@ -370,9 +309,74 @@ func TestGetZoneName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			result := getZoneName(tt.input)
-			if result != tt.expected {
-				t.Errorf("getZoneName(%s) = %s, want %s", tt.input, result, tt.expected)
-			}
+			require.Equal(t, tt.expected, result, "getZoneName(%s)", tt.input)
 		})
 	}
+}
+
+func TestHandleAXFR(t *testing.T) {
+	// start a test server
+	srvAddr := "127.0.0.1:0"
+	dnsServer := &dns.Server{Addr: srvAddr, Net: "tcp"}
+
+	// fake ExternalDNS implementation with one SOA + one A record
+	ext := &ExternalDNS{
+		cache: NewDNSCache(time.Minute),
+	}
+	ext.cache.AddRecord("example.org.", dns.TypeSOA, mustRR("example.org. 300 IN SOA ns1.example.org. hostmaster.example.org. 1 7200 3600 1209600 300"))
+	ext.cache.AddRecord("example.org.", dns.TypeA, mustRR("www.example.org. 300 IN A 192.0.2.1"))
+
+	dns.HandleFunc("example.org.", func(w dns.ResponseWriter, r *dns.Msg) {
+		_, err := ext.handleAXFR(w, r, "example.org.")
+		require.NoError(t, err, "handleAXFR failed")
+	})
+
+	// start server in background
+	go func() {
+		if err := dnsServer.ListenAndServe(); err != nil {
+			t.Logf("DNS server error: %v", err)
+		}
+	}()
+	defer func() {
+		err := dnsServer.Shutdown()
+		require.NoError(t, err, "Failed to shutdown DNS server")
+	}()
+
+	// give it time to start
+	time.Sleep(100 * time.Millisecond)
+
+	// dial AXFR request over TCP
+	conn, err := dns.Dial("tcp", dnsServer.Listener.Addr().String())
+	require.NoError(t, err)
+	defer func() {
+		err := conn.Close()
+		require.NoError(t, err, "Failed to close connection")
+	}()
+
+	tr := new(dns.Transfer)
+	m := new(dns.Msg)
+	m.SetAxfr("example.org.")
+
+	// tr.In returns a channel of *dns.Envelope, each containing RR slices
+	axfrChan, err := tr.In(m, dnsServer.Listener.Addr().String())
+	require.NoError(t, err)
+
+	var got []dns.RR
+	for env := range axfrChan {
+		require.NoError(t, env.Error)
+		got = append(got, env.RR...)
+	}
+
+	// Now check first and last are SOA
+	require.GreaterOrEqual(t, len(got), 2)
+	require.Equal(t, dns.TypeSOA, got[0].Header().Rrtype)
+	require.Equal(t, dns.TypeSOA, got[len(got)-1].Header().Rrtype)
+}
+
+func mustRR(s string) dns.RR {
+	rr, err := dns.NewRR(s)
+	if err != nil {
+		panic(err)
+	}
+	return rr
 }

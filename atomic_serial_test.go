@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -63,17 +64,13 @@ func TestAtomicSerialUpdate(t *testing.T) {
 	zone, exists := plugin.cache.zones[zoneName]
 	plugin.cache.RUnlock()
 
-	if !exists {
-		t.Fatalf("Zone %s was not created", zoneName)
-	}
+	require.True(t, exists, "Zone %s was not created", zoneName)
 
 	zone.RLock()
 	actualSerial := zone.Serial
 	zone.RUnlock()
 
-	if actualSerial != expectedSerial {
-		t.Errorf("Zone serial mismatch. Expected: %d, Got: %d", expectedSerial, actualSerial)
-	}
+	require.Equal(t, expectedSerial, actualSerial, "Zone serial mismatch")
 
 	// Verify all records exist
 	records := []string{"a.example.com.", "b.example.com.", "c.example.com."}
@@ -86,9 +83,7 @@ func TestAtomicSerialUpdate(t *testing.T) {
 		}
 
 		cachedRecords := plugin.cache.GetRecords(recordName, recordType)
-		if len(cachedRecords) == 0 {
-			t.Errorf("Record %s not found in cache", recordName)
-		}
+		require.Greater(t, len(cachedRecords), 0, "Record %s not found in cache", recordName)
 	}
 
 	t.Logf("All records successfully added with atomic serial update: %d", actualSerial)
@@ -165,20 +160,14 @@ func TestAtomicSerialUpdateOnModification(t *testing.T) {
 	finalSerial := zone.Serial
 	zone.RUnlock()
 
-	if finalSerial != expectedSerial {
-		t.Errorf("Serial not updated atomically. Expected: %d, Got: %d", expectedSerial, finalSerial)
-	}
+	require.Equal(t, expectedSerial, finalSerial, "Serial not updated atomically")
 
 	// Verify old record is gone and new record exists
 	oldRecords := plugin.cache.GetRecords("old.example.com.", 1)
-	if len(oldRecords) != 0 {
-		t.Errorf("Old record still exists after modification")
-	}
+	require.Equal(t, 0, len(oldRecords), "Old record still exists after modification")
 
 	newRecords := plugin.cache.GetRecords("new.example.com.", 1)
-	if len(newRecords) == 0 {
-		t.Errorf("New record not found after modification")
-	}
+	require.Greater(t, len(newRecords), 0, "New record not found after modification")
 
 	t.Logf("Atomic modification completed successfully. Serial: %d", finalSerial)
 }

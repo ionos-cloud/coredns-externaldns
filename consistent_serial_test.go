@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -53,14 +54,8 @@ func TestGenerateConsistentSerial(t *testing.T) {
 			serial2 := generateConsistentSerial(obj)
 
 			// Test consistency - same input should always produce same output
-			if serial1 != serial2 {
-				t.Errorf("Inconsistent serial generation: %d != %d", serial1, serial2)
-			}
-
-			// Test expected value
-			if serial1 != tt.expectedSerial {
-				t.Errorf("Expected serial %d, got %d", tt.expectedSerial, serial1)
-			}
+			require.Equal(t, serial1, serial2, "Inconsistent serial generation")
+			require.Equal(t, tt.expectedSerial, serial1, "Expected serial to match")
 		})
 	}
 }
@@ -82,15 +77,11 @@ func TestGenerateConsistentSerialWithoutCreationTime(t *testing.T) {
 	expected := expectedBase + 2
 
 	// Allow some tolerance for date boundary crossing during test execution
-	if serial1 < expected-200 || serial1 > expected+200 {
-		t.Errorf("Serial %d seems unreasonable compared to expected %d (YYYYMMDDnn+generation)", serial1, expected)
-	}
-
+	require.GreaterOrEqual(t, serial1, expected-200, "Serial should be within expected range")
+	require.LessOrEqual(t, serial1, expected+200, "Serial should be within expected range")
 	// Test consistency
 	serial2 := generateConsistentSerial(obj)
-	if serial1 != serial2 {
-		t.Errorf("Consistent serial generation failed: %d != %d", serial1, serial2)
-	}
+	require.Equal(t, serial1, serial2, "Consistent serial generation should be deterministic")
 }
 
 func TestSerialGenerationDeterministic(t *testing.T) {
@@ -108,14 +99,9 @@ func TestSerialGenerationDeterministic(t *testing.T) {
 	serial1 := generateConsistentSerial(obj1)
 	serial2 := generateConsistentSerial(obj2)
 
-	if serial1 != serial2 {
-		t.Errorf("Identical CRs should generate identical serials: %d != %d", serial1, serial2)
-	}
-
+	require.Equal(t, serial1, serial2, "Identical CRs should generate identical serials")
 	expectedSerial := uint32(20220116*100 + 3) // 2022011603
-	if serial1 != expectedSerial {
-		t.Errorf("Expected serial %d, got %d", expectedSerial, serial1)
-	}
+	require.Equal(t, expectedSerial, serial1, "Expected serial to match")
 }
 
 func TestSerialGenerationUnique(t *testing.T) {
@@ -134,9 +120,7 @@ func TestSerialGenerationUnique(t *testing.T) {
 	serial1 := generateConsistentSerial(obj1)
 	serial2 := generateConsistentSerial(obj2)
 
-	if serial1 == serial2 {
-		t.Errorf("Different generations should generate different serials, both got: %d", serial1)
-	}
+	require.NotEqual(t, serial1, serial2, "Different generations should generate different serials")
 
 	// Different creation time, same generation
 	obj3 := &unstructured.Unstructured{}
@@ -145,9 +129,7 @@ func TestSerialGenerationUnique(t *testing.T) {
 
 	serial3 := generateConsistentSerial(obj3)
 
-	if serial1 == serial3 {
-		t.Errorf("Different creation times should generate different serials, both got: %d", serial1)
-	}
+	require.NotEqual(t, serial1, serial3, "Different creation times should generate different serials")
 }
 
 func TestSerialGenerationConsistencyAcrossInstances(t *testing.T) {
@@ -166,9 +148,7 @@ func TestSerialGenerationConsistencyAcrossInstances(t *testing.T) {
 		serial := generateConsistentSerial(obj)
 		expectedSerial := uint32(20220116*100 + 5) // 2022011605
 
-		if serial != expectedSerial {
-			t.Errorf("Instance %d: Expected serial %d, got %d", i, expectedSerial, serial)
-		}
+		require.Equal(t, expectedSerial, serial, "Instance %d: Expected serial to match", i)
 	}
 }
 
@@ -215,16 +195,10 @@ func TestSerialGenerationOverflow(t *testing.T) {
 			baseSerial := uint32(year*1000000 + month*10000 + day*100)
 			expected := baseSerial + uint32(tt.generation)
 
-			if serial != expected {
-				t.Errorf("Expected serial %d, got %d", expected, serial)
-			}
-
+			require.Equal(t, expected, serial, "Expected serial to match")
 			// Test determinism
 			serial2 := generateConsistentSerial(obj)
-			if serial != serial2 {
-				t.Errorf("Serial generation should be deterministic: %d != %d", serial, serial2)
-			}
-
+			require.Equal(t, serial, serial2, "Serial generation should be deterministic")
 			t.Logf("CreationTime: %s, Generation: %d -> Serial: %d",
 				tt.creationTime.Format("2006-01-02"), tt.generation, serial)
 		})
@@ -270,15 +244,9 @@ func TestSerialGenerationRealistic(t *testing.T) {
 			baseSerial := uint32(year*1000000 + month*10000 + day*100)
 			expected := baseSerial + uint32(tt.generation)
 
-			if serial != expected {
-				t.Errorf("Expected serial %d, got %d", expected, serial)
-			}
-
+			require.Equal(t, expected, serial, "Expected serial to match")
 			// Verify the serial is reasonable for DNS (not zero, within uint32)
-			if serial == 0 {
-				t.Errorf("Serial should not be zero")
-			}
-
+			require.NotEqual(t, 0, serial, "Serial should not be zero")
 			t.Logf("CreationTime: %s, Generation: %d -> Serial: %d",
 				tt.creationTime.Format("2006-01-02"), tt.generation, serial)
 		})

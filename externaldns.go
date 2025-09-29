@@ -791,28 +791,38 @@ func (e *ExternalDNS) handleAXFR(w dns.ResponseWriter, r *dns.Msg, zone string) 
 	e.cache.getOrCreateZone(zoneName)
 
 	e.cache.RLock()
-	_, exists := e.cache.zones[zoneName]
+	records := e.cache.getZoneRecordsForAXFR(zoneName)
 	e.cache.RUnlock()
 
-	if !exists {
+	if len(records) == 0 {
 		log.Debugf("Zone %s not found for AXFR", zoneName)
 		return dns.RcodeNotAuth, nil
 	}
 
-	// Get all records for the zone
-	records := e.cache.getZoneRecordsForAXFR(zoneName)
+	// First SOA must appear at the start
+	if records[0].Header().Rrtype != dns.TypeSOA {
+		return dns.RcodeServerFailure, fmt.Errorf("first record must be SOA")
+	}
+	soa := records[0]
 
-	// Create AXFR response
+	// Send all records, starting with SOA
+	for _, rr := range records {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		m.Answer = []dns.RR{rr}
+
+		if err := w.WriteMsg(m); err != nil {
+			return dns.RcodeServerFailure, err
+		}
+	}
+
+	// And AXFR must end with SOA again
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Authoritative = true
-	m.Answer = records
-
-	log.Debugf("AXFR response for zone %s with %d records", zoneName, len(records))
-
-	err := w.WriteMsg(m)
-	if err != nil {
-		log.Errorf("Failed to write AXFR response: %v", err)
+	m.Answer = []dns.RR{soa}
+	if err := w.WriteMsg(m); err != nil {
 		return dns.RcodeServerFailure, err
 	}
 

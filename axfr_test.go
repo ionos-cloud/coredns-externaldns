@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAXFRSupport(t *testing.T) {
@@ -39,21 +40,15 @@ func TestAXFRSupport(t *testing.T) {
 
 	// Test Serial method
 	serial := e.Serial("example.com.")
-	if serial == 0 {
-		t.Errorf("Expected non-zero serial, got %d", serial)
-	}
+	require.NotZero(t, serial, "Expected non-zero serial")
 
 	// Test Transfer method
 	ch, err := e.Transfer("example.com.", 0)
-	if err != nil {
-		t.Fatalf("Transfer failed: %v", err)
-	}
+	require.NoError(t, err, "Transfer failed")
 
 	// Read from the channel
 	records := <-ch
-	if len(records) < 2 { // At least SOA + our records
-		t.Errorf("Expected at least 2 records, got %d", len(records))
-	}
+	require.GreaterOrEqual(t, len(records), 2, "Expected at least 2 records")
 
 	// Check if SOA record is present
 	var soaFound bool
@@ -63,9 +58,7 @@ func TestAXFRSupport(t *testing.T) {
 			break
 		}
 	}
-	if !soaFound {
-		t.Error("SOA record not found in AXFR response")
-	}
+	require.True(t, soaFound, "SOA record not found in AXFR response")
 }
 
 func TestRebuildZoneRecords(t *testing.T) {
@@ -98,7 +91,5 @@ func TestRebuildZoneRecords(t *testing.T) {
 	zone.RUnlock()
 
 	// Should have at least 1 A record
-	if recordCount < 1 {
-		t.Errorf("Expected at least 1 record, got %d", recordCount)
-	}
+	require.GreaterOrEqual(t, recordCount, 1, "Expected at least 1 record")
 }
