@@ -143,21 +143,21 @@ func (c *DNSCache) metricsUpdateLoop() {
 	}
 }
 
-// generateConsistentSerial produces a deterministic serial number based on creation timestamp and generation.
-// Ensures all CoreDNS instances generate the same serial for the same CR state.
-// Format: YYYYMMDDnn, where nn is derived from .metadata.generation.
-func generateConsistentSerial(dnsEndpoint *externaldnsv1alpha1.DNSEndpoint) uint32 {
+// suggestSerialNumber suggests a serial number based on the DNSEndpoint's creation timestamp
+func suggestSerialNumber(dnsEndpoint *externaldnsv1alpha1.DNSEndpoint) uint32 {
 	t := dnsEndpoint.GetCreationTimestamp()
 	if t.IsZero() {
 		// Fallback: use current time if creationTimestamp is unset
 		t = metav1.NewTime(time.Now())
 	}
 
-	// Format date as YYYYMMDD and reserve two digits (nn) for generation
-	base := uint32(t.Year()*10000 + int(t.Month())*100 + t.Day())
-	serial := base*100 + uint32(dnsEndpoint.GetGeneration())
+	serial := t.Unix()
+	if dnsEndpoint.GetGeneration() > 0 {
+		serial += dnsEndpoint.GetGeneration()
+	}
 
-	return serial
+	// see you in 2038
+	return uint32(serial)
 }
 
 func getRecordName(name string) string {
@@ -1037,11 +1037,10 @@ func (e *ExternalDNS) processDNSEndpoint(ctx context.Context, obj *unstructured.
 		return
 	}
 
-	// Generate consistent serial number based on CR metadata
-	// This ensures all CoreDNS instances generate the same serial for the same CR state
-	consistentSerial := generateConsistentSerial(dnsEndpoint)
+	// Suggest a consistent serial number based on creation timestamp and generation
+	proposalSerial := suggestSerialNumber(dnsEndpoint)
 	log.Debugf("Generated consistent serial %d for DNSEndpoint %s/%s (resourceVersion: %s, generation: %d)",
-		consistentSerial, dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), dnsEndpoint.GetResourceVersion(), dnsEndpoint.GetGeneration())
+		proposalSerial, dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), dnsEndpoint.GetResourceVersion(), dnsEndpoint.GetGeneration())
 
 	// Check for PTR record creation annotation
 	createPTR := false
@@ -1066,10 +1065,10 @@ func (e *ExternalDNS) processDNSEndpoint(ctx context.Context, obj *unstructured.
 		}
 
 		// Update zone serials ONCE at the end for all affected zones
-		e.updateZoneSerialsForRecords(ctx, addedRecordRefs, consistentSerial)
+		e.updateZoneSerialsForRecords(ctx, addedRecordRefs, proposalSerial, false)
 
 		log.Debugf("Added cache with %d endpoints from %s/%s (createPTR: %v, serial: %d)",
-			len(dnsEndpoint.Spec.Endpoints), dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), createPTR, consistentSerial)
+			len(dnsEndpoint.Spec.Endpoints), dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), createPTR, proposalSerial)
 
 	case "MODIFIED":
 		endpointKey := fmt.Sprintf("%s/%s", dnsEndpoint.GetNamespace(), dnsEndpoint.GetName())
@@ -1091,10 +1090,10 @@ func (e *ExternalDNS) processDNSEndpoint(ctx context.Context, obj *unstructured.
 
 		// Update zone serials ONCE at the end for all affected zones
 		// This ensures slaves see atomic updates and don't request AXFR mid-processing
-		e.updateZoneSerialsForRecords(ctx, newRecordRefs, consistentSerial)
+		e.updateZoneSerialsForRecords(ctx, newRecordRefs, proposalSerial, true)
 
 		log.Debugf("Modified cache with %d endpoints from %s/%s (createPTR: %v, serial: %d)",
-			len(dnsEndpoint.Spec.Endpoints), dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), createPTR, consistentSerial)
+			len(dnsEndpoint.Spec.Endpoints), dnsEndpoint.GetNamespace(), dnsEndpoint.GetName(), createPTR, proposalSerial)
 
 	case "DELETED":
 		// Remove all records for this DNSEndpoint
@@ -1102,7 +1101,7 @@ func (e *ExternalDNS) processDNSEndpoint(ctx context.Context, obj *unstructured.
 		deletedRecords := e.cache.RemoveRecordsByEndpoint(endpointKey)
 
 		// Update zone serials ONCE at the end for all affected zones
-		e.updateZoneSerialsForRecords(ctx, deletedRecords, consistentSerial)
+		e.updateZoneSerialsForRecords(ctx, deletedRecords, proposalSerial, true)
 
 		log.Debugf("Removed %d records for deleted DNSEndpoint %s/%s",
 			len(deletedRecords), dnsEndpoint.GetNamespace(), dnsEndpoint.GetName())
@@ -1236,7 +1235,7 @@ func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) [
 }
 
 // updateZoneSerialsForRecords updates the serial for all zones affected by the given records
-func (e *ExternalDNS) updateZoneSerialsForRecords(ctx context.Context, records []RecordRef, proposedSerial uint32) {
+func (e *ExternalDNS) updateZoneSerialsForRecords(ctx context.Context, records []RecordRef, proposedSerial uint32, forceUpdate bool) {
 	// Collect unique zones from the records
 	affectedZones := make(map[string]bool)
 	for _, ref := range records {
@@ -1251,17 +1250,15 @@ func (e *ExternalDNS) updateZoneSerialsForRecords(ctx context.Context, records [
 
 	updatedZones := make([]string, 0, len(affectedZones))
 	for zoneName := range affectedZones {
-		if proposedSerial == e.zoneSerials[zoneName] {
-			// No change needed
-			continue
-		}
-
 		if proposedSerial > e.zoneSerials[zoneName] {
 			// Use the proposed serial if it's higher
 			e.zoneSerials[zoneName] = proposedSerial
-		} else if proposedSerial < e.zoneSerials[zoneName] {
+		} else if forceUpdate {
 			// If proposed serial is lower, increment current serial to ensure monotonic increase
 			e.zoneSerials[zoneName]++
+		} else {
+			// No update needed
+			continue
 		}
 
 		updatedZones = append(updatedZones, zoneName)

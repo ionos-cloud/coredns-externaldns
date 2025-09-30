@@ -54,7 +54,7 @@ func TestAtomicSerialUpdate(t *testing.T) {
 	require.NoError(t, err, "Failed to convert unstructured to DNSEndpoint")
 
 	// Get the expected consistent serial
-	expectedSerial := generateConsistentSerial(ep)
+	expectedSerial := suggestSerialNumber(ep)
 	t.Logf("Expected consistent serial: %d", expectedSerial)
 
 	// Process the endpoint as ADDED
@@ -155,7 +155,7 @@ func TestAtomicSerialUpdateOnModification(t *testing.T) {
 	ep, err := unstructuredToDNSEndpoint(dnsEndpoint)
 	require.NoError(t, err, "Failed to convert unstructured to DNSEndpoint")
 
-	expectedSerial := generateConsistentSerial(ep)
+	expectedSerial := suggestSerialNumber(ep)
 	t.Logf("Initial serial: %d, Expected new serial: %d", initialSerial, expectedSerial)
 
 	// Process as MODIFIED
