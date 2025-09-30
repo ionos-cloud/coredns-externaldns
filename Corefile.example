@@ -23,6 +23,10 @@
         # Metrics update interval (30 seconds is default)
         # Use shorter intervals for more responsive metrics, longer for less overhead
         metrics_interval 30s
+        
+        # Optional: SOA configuration for AXFR
+        # soa_ns ns1.example.com
+        # soa_mbox hostmaster.example.com
     }
 
     # Enable zone transfers (AXFR) for slave DNS servers

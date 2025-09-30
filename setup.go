@@ -101,6 +101,16 @@ func parseExternalDNS(c *caddy.Controller) (*ExternalDNS, error) {
 					return nil, c.ArgErr()
 				}
 				ed.configMapNamespace = c.Val()
+			case "soa_ns":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				ed.soaNs = c.Val()
+			case "soa_mbox":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				ed.soaMbox = c.Val()
 			default:
 				return nil, c.Errf("unknown property '%s'", c.Val())
 			}

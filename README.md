@@ -145,15 +145,19 @@ Use the provided `Corefile.standalone` as a starting point:
     externaldns {
         # Optional: specify namespace to watch (default: all namespaces)
         # namespace default
-        
+
         # Optional: set default TTL in seconds (default: 300)
         ttl 300
-        
+
         # Optional: ConfigMap name for zone serial persistence (default: "coredns-externaldns-zone-serials")
         # configmap_name my-custom-serials
-        
+
         # Optional: ConfigMap namespace (default: same as plugin namespace or "default")
         # configmap_namespace kube-system
+
+        # Optional: SOA configuration for AXFR (set when enabling transfer/AXFR)
+        # soa_ns ns1.example.com
+        # soa_mbox hostmaster.example.com
     }
     
     # Forward queries not handled by externaldns to upstream DNS
@@ -183,6 +187,13 @@ When using the plugin with existing CoreDNS, add the externaldns block to your C
 - `ttl`: Default TTL for DNS records in seconds (default: 300)
 - `configmap_name`: Name of the ConfigMap used to persist zone serials (default: "coredns-externaldns-zone-serials")
 - `configmap_namespace`: Namespace for the ConfigMap. If not specified, uses the same namespace as the plugin's `namespace` setting, or "default" if no namespace is configured
+
+#### SOA configuration (AXFR)
+
+- `soa_ns`: Optional. Sets the SOA NS field used in the SOA record returned during AXFR transfers. If omitted, defaults to `ns1.<zone>`.
+- `soa_mbox`: Optional. Sets the SOA MBOX (responsible mailbox) field used in the SOA record returned during AXFR transfers. If omitted, defaults to `hostmaster.<zone>`.
+
+Important: If you enable zone transfers (the `transfer` plugin) or otherwise expose AXFR for slaves, you should explicitly configure `soa_ns` and `soa_mbox` so slaves receive consistent and expected SOA values. Without explicit values the plugin falls back to sensible defaults, but in multi-server or production setups it's recommended to set these to stable, fully-qualified hostnames.
 
 **Note**: This plugin uses in-cluster service account authentication. Ensure proper RBAC permissions are configured.
 

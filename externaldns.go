@@ -41,6 +41,9 @@ type ExternalDNS struct {
 	namespace             string
 	ttl                   uint32
 	metricsUpdateInterval time.Duration
+	// SOA configuration
+	soaNs   string
+	soaMbox string
 
 	client     dynamic.Interface
 	coreClient coreclientv1.CoreV1Interface
@@ -631,22 +634,7 @@ func (c *DNSCache) getZoneRecordsForAXFR(zoneName string) []dns.RR {
 
 	var allRecords []dns.RR
 
-	// Add SOA record first
-	soaRecord := &dns.SOA{
-		Hdr: dns.RR_Header{
-			Name:   zoneName,
-			Rrtype: dns.TypeSOA,
-			Class:  dns.ClassINET,
-			Ttl:    300,
-		},
-		Ns:      "ns1." + zoneName,
-		Serial:  zone.Serial,
-		Refresh: 3600,
-		Retry:   1800,
-		Expire:  604800,
-		Minttl:  300,
-	}
-	allRecords = append(allRecords, soaRecord)
+	// Note: SOA record is constructed by the ExternalDNS wrapper which has plugin-level configuration
 
 	// Add all records for this zone
 	for domain, types := range zone.Records {
@@ -659,6 +647,43 @@ func (c *DNSCache) getZoneRecordsForAXFR(zoneName string) []dns.RR {
 
 	log.Debugf("Zone %s has %d records for AXFR", zoneName, len(allRecords))
 	return allRecords
+}
+
+// getZoneRecordsForAXFRWithSOA returns zone records with an SOA record constructed using provided ns and mbox.
+func (e *ExternalDNS) getZoneRecordsForAXFR(zoneName string) []dns.RR {
+	// Ensure zone exists
+	e.cache.RLock()
+	zone, exists := e.cache.zones[zoneName]
+	e.cache.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	// Get the rest of the records (without SOA)
+	records := e.cache.getZoneRecordsForAXFR(zoneName)
+
+	// Insert SOA at the beginning
+	soa := &dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   zoneName,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		Ns:      dns.Fqdn(e.soaNs),
+		Mbox:    dns.Fqdn(e.soaMbox),
+		Serial:  zone.Serial,
+		Refresh: 3600,
+		Retry:   1800,
+		Expire:  604800,
+		Minttl:  300,
+	}
+
+	result := make([]dns.RR, 0, len(records)+1)
+	result = append(result, soa)
+	result = append(result, records...)
+	return result
 }
 
 // ServeDNS implements the plugin.Handler interface
@@ -739,9 +764,8 @@ func (e *ExternalDNS) Transfer(zone string, serial uint32) (<-chan []dns.RR, err
 	// Ensure zone exists
 	e.cache.getOrCreateZone(zoneName)
 
-	e.cache.RLock()
-	records := e.cache.getZoneRecordsForAXFR(zoneName)
-	e.cache.RUnlock()
+	// Get records with SOA constructed using plugin configuration
+	records := e.getZoneRecordsForAXFR(zoneName)
 
 	if len(records) == 0 {
 		log.Debugf("Zone %s not found for AXFR", zoneName)

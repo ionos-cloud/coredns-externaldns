@@ -19,6 +19,10 @@
         
         # Optional: set default TTL in seconds (default: 300)
         ttl 300
+        
+        # Optional: SOA configuration when enabling AXFR/transfer
+        # soa_ns ns1.example.com
+        # soa_mbox hostmaster.example.com
     }
     
     # Optional: Enable zone transfers (AXFR) for slave DNS servers
