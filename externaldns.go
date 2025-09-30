@@ -640,7 +640,6 @@ func (c *DNSCache) getZoneRecordsForAXFR(zoneName string) []dns.RR {
 			Ttl:    300,
 		},
 		Ns:      "ns1." + zoneName,
-		Mbox:    "admin." + zoneName,
 		Serial:  zone.Serial,
 		Refresh: 3600,
 		Retry:   1800,
