@@ -190,10 +190,10 @@ When using the plugin with existing CoreDNS, add the externaldns block to your C
 
 #### SOA configuration (AXFR)
 
-- `soa_ns`: Optional. Sets the SOA NS field used in the SOA record returned during AXFR transfers. If omitted, defaults to `ns1.<zone>`.
-- `soa_mbox`: Optional. Sets the SOA MBOX (responsible mailbox) field used in the SOA record returned during AXFR transfers. If omitted, defaults to `hostmaster.<zone>`.
+- `soa_ns`: Optional. Sets the SOA NS field used in the SOA record returned during AXFR transfers.
+- `soa_mbox`: Optional. Sets the SOA MBOX (responsible mailbox) field used in the SOA record returned during AXFR transfers.
 
-Important: If you enable zone transfers (the `transfer` plugin) or otherwise expose AXFR for slaves, you should explicitly configure `soa_ns` and `soa_mbox` so slaves receive consistent and expected SOA values. Without explicit values the plugin falls back to sensible defaults, but in multi-server or production setups it's recommended to set these to stable, fully-qualified hostnames.
+Important: If you enable zone transfers (the `transfer` plugin) or otherwise expose AXFR for slaves, you should explicitly configure `soa_ns` and `soa_mbox` so slaves receive consistent and expected SOA values.
 
 **Note**: This plugin uses in-cluster service account authentication. Ensure proper RBAC permissions are configured.
 
