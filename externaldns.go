@@ -506,6 +506,7 @@ func (c *DNSCache) removeSpecificRecords(recordsToRemove []RecordRef) {
 }
 
 // GetRecords retrieves DNS records from the cache
+// Optimized to reduce allocations and improve performance
 func (c *DNSCache) GetRecords(name string, qtype uint16) []dns.RR {
 	name = getRecordName(name)
 	zoneName := getZoneName(name)
@@ -521,8 +522,9 @@ func (c *DNSCache) GetRecords(name string, qtype uint16) []dns.RR {
 	zone.RLock()
 	defer zone.RUnlock()
 
-	if zone.Records[name] != nil {
-		if records, typeExists := zone.Records[name][qtype]; typeExists {
+	if typeMap := zone.Records[name]; typeMap != nil {
+		if records := typeMap[qtype]; len(records) > 0 {
+			// Return a copy to prevent external modifications
 			result := make([]dns.RR, len(records))
 			copy(result, records)
 			return result
@@ -616,13 +618,18 @@ func (c *DNSCache) recordMatches(rr dns.RR, target string) bool {
 }
 
 // getZoneName extracts the zone name from a domain name
+// Optimized version that avoids unnecessary string operations
 func getZoneName(name string) string {
 	fqdn := dns.Fqdn(name)
-	labels := dns.SplitDomainName(fqdn)
-	if len(labels) <= 1 {
+	
+	// Find first dot position
+	dotIndex := strings.IndexByte(fqdn, '.')
+	if dotIndex == -1 || dotIndex == len(fqdn)-1 {
 		return fqdn // Root zone or invalid
 	}
-	return dns.Fqdn(strings.Join(labels[1:], "."))
+	
+	// Return everything after the first dot
+	return fqdn[dotIndex+1:]
 }
 
 // getOrCreateZone gets an existing zone or creates it if it doesn't exist
@@ -733,8 +740,6 @@ func (e *ExternalDNS) getZoneRecordsForAXFR(zoneName string) []dns.RR {
 
 // ServeDNS implements the plugin.Handler interface
 func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	log.Info("Received DNS query")
-
 	if len(r.Question) == 0 {
 		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 	}
@@ -753,18 +758,29 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 		return dns.RcodeRefused, nil
 	}
 
-	// Increment request counter
+	// Calculate zone name once and reuse
 	zoneName := getZoneName(qname)
 	externalDNSRequestCount.WithLabelValues(server, "udp", dns.TypeToString[qtype], zoneName).Inc()
 
 	// Get records from cache
 	records := e.cache.GetRecords(qname, qtype)
+	
+	// If no exact match, try CNAME for non-CNAME queries
+	var cnameRecords []dns.RR
+	if len(records) == 0 && qtype != dns.TypeCNAME {
+		cnameRecords = e.cache.GetRecords(qname, dns.TypeCNAME)
+		if len(cnameRecords) > 0 {
+			records = cnameRecords
+		}
+	}
 
 	if len(records) == 0 {
 		// Try wildcard lookup for subdomains
-		parts := strings.Split(qname, ".")
-		for i := 1; i < len(parts); i++ {
-			wildcard := "*." + strings.Join(parts[i:], ".")
+		qnameFqdn := dns.Fqdn(qname)
+		labels := dns.SplitDomainName(qnameFqdn)
+		
+		for i := 1; i < len(labels); i++ {
+			wildcard := "*." + dns.Fqdn(strings.Join(labels[i:], "."))
 			wildcardRecords := e.cache.GetRecords(wildcard, qtype)
 
 			// If no records found and not CNAME, also check for CNAME records at the wildcard
@@ -778,7 +794,7 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 				for j, rr := range wildcardRecords {
 					// Clone the record and update the name to match the query
 					records[j] = dns.Copy(rr)
-					records[j].Header().Name = qname
+					records[j].Header().Name = qnameFqdn
 				}
 				log.Debugf("Found wildcard match %s for query %s, returning %d rewritten records", wildcard, qname, len(records))
 				break
@@ -799,6 +815,16 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
 	// Add records to answer section
 	m.Answer = append(m.Answer, records...)
+
+	// Add glue records for NS queries
+	if qtype == dns.TypeNS {
+		e.addGlueRecords(m, records)
+	}
+
+	// Follow CNAME chain if responding with CNAME to non-CNAME query
+	if len(cnameRecords) > 0 && qtype != dns.TypeCNAME {
+		e.followCNAMEChain(m, cnameRecords[0], qtype)
+	}
 
 	log.Debugf("Returning %d records for %s %s", len(records), qname, dns.TypeToString[qtype])
 
@@ -1568,6 +1594,121 @@ func (e *ExternalDNS) createAndAddPTRRecordWithRefs(hostname, ipAddr string, ttl
 
 	log.Debugf("Created PTR record: %s -> %s", ptrName, hostname)
 	return refs
+}
+
+// isAuthoritative checks if this plugin is authoritative for the given domain
+func (e *ExternalDNS) isAuthoritative(qname string) bool {
+	zoneName := getZoneName(qname)
+	
+	e.cache.RLock()
+	_, exists := e.cache.zones[zoneName]
+	e.cache.RUnlock()
+	
+	return exists
+}
+
+// sendNXDOMAIN sends an NXDOMAIN response with proper authority section
+func (e *ExternalDNS) sendNXDOMAIN(w dns.ResponseWriter, r *dns.Msg, zoneName string) (int, error) {
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.Authoritative = true
+	m.RecursionAvailable = false
+	m.Rcode = dns.RcodeNameError
+	
+	// Add SOA record to authority section for NXDOMAIN (RFC 1035)
+	if soa := e.getSOARecord(zoneName); soa != nil {
+		m.Ns = append(m.Ns, soa)
+	}
+	
+	err := w.WriteMsg(m)
+	if err != nil {
+		log.Errorf("Failed to write NXDOMAIN response: %v", err)
+		return dns.RcodeServerFailure, err
+	}
+	
+	return dns.RcodeNameError, nil
+}
+
+// getSOARecord creates an SOA record for the zone
+func (e *ExternalDNS) getSOARecord(zoneName string) dns.RR {
+	e.cache.RLock()
+	zone, exists := e.cache.zones[zoneName]
+	e.cache.RUnlock()
+	
+	if !exists {
+		return nil
+	}
+	
+	zone.RLock()
+	serial := zone.Serial
+	zone.RUnlock()
+	
+	return &dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   zoneName,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    e.ttl,
+		},
+		Ns:      dns.Fqdn(e.soaNs),
+		Mbox:    dns.Fqdn(e.soaMbox),
+		Serial:  serial,
+		Refresh: 3600,
+		Retry:   600,
+		Expire:  604800,
+		Minttl:  e.ttl,
+	}
+}
+
+// addGlueRecords adds glue records to the additional section for NS responses
+func (e *ExternalDNS) addGlueRecords(m *dns.Msg, nsRecords []dns.RR) {
+	for _, nsRR := range nsRecords {
+		if ns, ok := nsRR.(*dns.NS); ok {
+			// Look for A/AAAA records for the NS name
+			aRecords := e.cache.GetRecords(ns.Ns, dns.TypeA)
+			aaaaRecords := e.cache.GetRecords(ns.Ns, dns.TypeAAAA)
+			
+			m.Extra = append(m.Extra, aRecords...)
+			m.Extra = append(m.Extra, aaaaRecords...)
+		}
+	}
+}
+
+// followCNAMEChain follows CNAME records and adds target records to response
+func (e *ExternalDNS) followCNAMEChain(m *dns.Msg, cnameRR dns.RR, qtype uint16) {
+	const maxChainLength = 10 // Prevent infinite loops
+	visited := make(map[string]bool)
+	
+	current := cnameRR
+	for i := 0; i < maxChainLength; i++ {
+		cname, ok := current.(*dns.CNAME)
+		if !ok {
+			break
+		}
+		
+		target := cname.Target
+		if visited[target] {
+			// Prevent loops
+			break
+		}
+		visited[target] = true
+		
+		// Look for the target record type
+		targetRecords := e.cache.GetRecords(target, qtype)
+		if len(targetRecords) > 0 {
+			m.Answer = append(m.Answer, targetRecords...)
+			break
+		}
+		
+		// Look for another CNAME
+		cnameRecords := e.cache.GetRecords(target, dns.TypeCNAME)
+		if len(cnameRecords) > 0 {
+			current = cnameRecords[0]
+			m.Answer = append(m.Answer, current)
+		} else {
+			break
+		}
+	}
 }
 
 // createReverseDNSName creates a reverse DNS name from an IP address
