@@ -70,21 +70,21 @@ var (
 		Subsystem: "externaldns",
 		Name:      "requests_total",
 		Help:      "Counter of DNS requests made to external-dns plugin.",
-	}, []string{"server", "proto", "type", "zone"})
+	}, []string{"proto", "type", "zone"})
 
 	cacheSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: plugin.Namespace,
 		Subsystem: "externaldns",
 		Name:      "cache_size",
 		Help:      "Number of entries in the DNS cache.",
-	}, []string{"server", "zone"})
+	}, []string{"zone"})
 
 	endpointEvents = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: plugin.Namespace,
 		Subsystem: "externaldns",
 		Name:      "endpoint_events_total",
 		Help:      "Counter of DNSEndpoint events processed.",
-	}, []string{"server", "type"})
+	}, []string{"type"})
 )
 
 // New creates a new ExternalDNS plugin instance
@@ -123,7 +123,7 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 
 	// Update metrics
 	if p.metrics.RequestCount != nil {
-		p.metrics.RequestCount.WithLabelValues("coredns", proto(w), dns.TypeToString[qtype], getZone(qname)).Inc()
+		p.metrics.RequestCount.WithLabelValues(proto(w), dns.TypeToString[qtype], getZone(qname)).Inc()
 	}
 
 	// If transfer is not loaded, we'll see these, answer with refused (no transfer allowed).
@@ -262,7 +262,7 @@ func (p *Plugin) OnAdd(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	}
 
 	if p.metrics.EndpointEvents != nil {
-		p.metrics.EndpointEvents.WithLabelValues("coredns", "added").Inc()
+		p.metrics.EndpointEvents.WithLabelValues("added").Inc()
 	}
 
 	return nil
@@ -303,7 +303,7 @@ func (p *Plugin) OnUpdate(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	p.saveZoneSerials(p.ctx, updatedZones)
 
 	if p.metrics.EndpointEvents != nil {
-		p.metrics.EndpointEvents.WithLabelValues("coredns", "updated").Inc()
+		p.metrics.EndpointEvents.WithLabelValues("updated").Inc()
 	}
 
 	return nil
@@ -338,7 +338,7 @@ func (p *Plugin) OnDelete(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	p.saveZoneSerials(p.ctx, updatedZones)
 
 	if p.metrics.EndpointEvents != nil {
-		p.metrics.EndpointEvents.WithLabelValues("coredns", "deleted").Inc()
+		p.metrics.EndpointEvents.WithLabelValues("deleted").Inc()
 	}
 
 	return nil
