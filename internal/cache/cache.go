@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ionos-cloud/coredns-externaldns/internal/utils"
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -54,13 +55,10 @@ func normalizeName(name string) string {
 }
 
 // getZoneName extracts zone name from a domain name
+// This uses the shared zone detection logic
 func getZoneName(name string) string {
 	name = normalizeName(name)
-	parts := dns.SplitDomainName(name)
-	if len(parts) >= 2 {
-		return dns.Fqdn(strings.Join(parts[len(parts)-2:], "."))
-	}
-	return name
+	return utils.ExtractZoneFromDomain(name)
 }
 
 // AddRecord adds a DNS record to the cache

@@ -26,6 +26,7 @@ import (
 
 	"github.com/ionos-cloud/coredns-externaldns/internal/cache"
 	dnsbuilder "github.com/ionos-cloud/coredns-externaldns/internal/dns"
+	"github.com/ionos-cloud/coredns-externaldns/internal/utils"
 	"github.com/ionos-cloud/coredns-externaldns/internal/watcher"
 )
 
@@ -622,9 +623,5 @@ func proto(w dns.ResponseWriter) string {
 }
 
 func getZone(name string) string {
-	parts := dns.SplitDomainName(name)
-	if len(parts) >= 2 {
-		return dns.Fqdn(parts[len(parts)-2] + "." + parts[len(parts)-1])
-	}
-	return name
+	return utils.ExtractZoneFromDomain(name)
 }
