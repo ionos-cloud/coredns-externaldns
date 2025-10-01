@@ -2,7 +2,7 @@ apiVersion: v2
 name: coredns-externaldns
 description: A Helm chart for CoreDNS with external-dns plugin integration
 type: application
-version: 0.1.11
+version: 0.1.12
 # The appVersion will be updated automatically by the Helm chart release workflow
 appVersion: "v0.1.0"
 home: https://github.com/ionos-cloud/coredns-externaldns
