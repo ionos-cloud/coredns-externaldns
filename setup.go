@@ -2,14 +2,80 @@ package externaldns
 
 import (
 	"context"
+	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/transfer"
 )
+
+// Config holds the plugin configuration
+type Config struct {
+	// Core settings
+	Namespace string
+	TTL       uint32
+
+	// SOA configuration
+	SOA SOAConfig
+
+	// ConfigMap settings for zone serial persistence
+	ConfigMap ConfigMapConfig
+}
+
+// SOAConfig holds SOA record configuration
+type SOAConfig struct {
+	Nameserver string // NS field
+	Mailbox    string // MBOX field
+	Refresh    uint32 // Refresh interval
+	Retry      uint32 // Retry interval
+	Expire     uint32 // Expire time
+	MinTTL     uint32 // Minimum TTL
+}
+
+// ConfigMapConfig holds ConfigMap settings
+type ConfigMapConfig struct {
+	Name      string // ConfigMap name
+	Namespace string // ConfigMap namespace
+}
+
+// DefaultConfig returns a configuration with sensible defaults
+func DefaultConfig() *Config {
+	return &Config{
+		Namespace: "",
+		TTL:       300,
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.com",
+			Mailbox:    "admin.example.com",
+			Refresh:    3600,
+			Retry:      1800,
+			Expire:     1209600,
+			MinTTL:     300,
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "coredns-externaldns-zone-serials",
+			Namespace: "",
+		},
+	}
+}
+
+// Validate checks if the configuration is valid
+func (c *Config) Validate() error {
+	if c.TTL == 0 {
+		return fmt.Errorf("TTL cannot be zero")
+	}
+	if c.SOA.Nameserver == "" {
+		return fmt.Errorf("SOA nameserver cannot be empty")
+	}
+	if c.SOA.Mailbox == "" {
+		return fmt.Errorf("SOA mailbox cannot be empty")
+	}
+	if c.ConfigMap.Name == "" {
+		return fmt.Errorf("ConfigMap name cannot be empty")
+	}
+	return nil
+}
 
 // init registers this plugin with CoreDNS
 func init() {
@@ -48,9 +114,6 @@ func setup(c *caddy.Controller) error {
 	// Register shutdown handler
 	c.OnShutdown(func() error {
 		ed.Stop()
-		if ed.cache != nil {
-			ed.cache.Stop()
-		}
 		return nil
 	})
 
@@ -58,67 +121,101 @@ func setup(c *caddy.Controller) error {
 }
 
 // parseExternalDNS parses the plugin configuration
-func parseExternalDNS(c *caddy.Controller) (*ExternalDNS, error) {
-	ed := &ExternalDNS{
-		ttl:                   300,                                // Default TTL of 5 minutes
-		metricsUpdateInterval: 30 * time.Second,                   // Default metrics update interval of 30 seconds
-		configMapName:         "coredns-externaldns-zone-serials", // Default ConfigMap name
-	}
+func parseExternalDNS(c *caddy.Controller) (*Plugin, error) {
+	config := DefaultConfig()
 
 	for c.Next() {
 		for c.NextBlock() {
 			switch c.Val() {
+			// Core settings
 			case "namespace":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				ed.namespace = c.Val()
+				config.Namespace = c.Val()
 			case "ttl":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				ttl, err := strconv.Atoi(c.Val())
+				t, err := strconv.ParseUint(c.Val(), 10, 32)
 				if err != nil {
-					return nil, c.Errf("invalid TTL value: %s", c.Val())
+					return nil, c.Errf("invalid TTL: %v", err)
 				}
-				ed.ttl = uint32(ttl)
-			case "metrics_interval":
+				config.TTL = uint32(t)
+
+			// SOA configuration
+			case "soa_ns", "soa_nameserver":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				interval, err := time.ParseDuration(c.Val())
-				if err != nil {
-					return nil, c.Errf("invalid metrics interval value: %s", c.Val())
+				config.SOA.Nameserver = c.Val()
+			case "soa_mbox", "soa_mailbox":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
 				}
-				ed.metricsUpdateInterval = interval
+				config.SOA.Mailbox = c.Val()
+			case "soa_refresh":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				r, err := strconv.ParseUint(c.Val(), 10, 32)
+				if err != nil {
+					return nil, c.Errf("invalid SOA refresh: %v", err)
+				}
+				config.SOA.Refresh = uint32(r)
+			case "soa_retry":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				r, err := strconv.ParseUint(c.Val(), 10, 32)
+				if err != nil {
+					return nil, c.Errf("invalid SOA retry: %v", err)
+				}
+				config.SOA.Retry = uint32(r)
+			case "soa_expire":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				e, err := strconv.ParseUint(c.Val(), 10, 32)
+				if err != nil {
+					return nil, c.Errf("invalid SOA expire: %v", err)
+				}
+				config.SOA.Expire = uint32(e)
+			case "soa_minttl":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				m, err := strconv.ParseUint(c.Val(), 10, 32)
+				if err != nil {
+					return nil, c.Errf("invalid SOA minttl: %v", err)
+				}
+				config.SOA.MinTTL = uint32(m)
+
+			// ConfigMap configuration
 			case "configmap_name":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				ed.configMapName = c.Val()
+				config.ConfigMap.Name = c.Val()
 			case "configmap_namespace":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				ed.configMapNamespace = c.Val()
-			case "soa_ns":
-				if !c.NextArg() {
-					return nil, c.ArgErr()
-				}
-				ed.soaNs = c.Val()
-			case "soa_mbox":
-				if !c.NextArg() {
-					return nil, c.ArgErr()
-				}
-				ed.soaMbox = c.Val()
+				config.ConfigMap.Namespace = c.Val()
+
 			default:
-				return nil, c.Errf("unknown property '%s'", c.Val())
+				return nil, c.Errf("unknown property: %s", c.Val())
 			}
 		}
 	}
 
-	// Create cache with the configured metrics interval
-	ed.cache = NewDNSCache(ed.metricsUpdateInterval)
+	// Validate configuration
+	if err := config.Validate(); err != nil {
+		return nil, c.Errf("configuration validation failed: %v", err)
+	}
 
-	return ed, nil
+	// Create plugin with structured configuration
+	plugin := New(config)
+
+	return plugin, nil
 }
