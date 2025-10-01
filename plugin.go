@@ -300,9 +300,20 @@ func (p *Plugin) OnUpdate(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	serial := p.generateSerial(endpoint, watch.Modified)
 	createPTR := p.shouldCreatePTR(endpoint)
 
-	// For updates, we delete and re-add to ensure consistency
-	if err := p.OnDelete(endpoint); err != nil {
-		pluginLog.Errorf("Failed to delete during update: %v", err)
+	// For updates, we need to clean up all existing records for this endpoint
+	// since the old targets might be different from the new ones
+	for _, ep := range endpoint.Spec.Endpoints {
+		qtype := p.recordBuilder.RecordTypeToQType(ep.RecordType)
+		if qtype != 0 {
+			// Remove all existing records for this name and type
+			p.cache.RemoveAllRecords(ep.DNSName, qtype)
+
+			// Also remove PTR records if they were created
+			if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
+				// Remove all PTR records pointing to this DNS name
+				p.cache.RemoveAllPTRRecordsForName(ep.DNSName)
+			}
+		}
 	}
 
 	zones := make(map[string]bool)

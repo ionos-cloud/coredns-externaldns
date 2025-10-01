@@ -195,6 +195,85 @@ func (c *Cache) RemoveRecord(name string, qtype uint16, target string) bool {
 	return false
 }
 
+// RemoveAllRecords removes all DNS records for a given name and type from cache
+func (c *Cache) RemoveAllRecords(name string, qtype uint16) bool {
+	name = normalizeName(name)
+	zoneName := getZoneName(name)
+
+	c.mu.RLock()
+	zone, exists := c.zones[zoneName]
+	c.mu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	zone.mu.Lock()
+	defer zone.mu.Unlock()
+
+	_, ok := zone.Records[name][qtype]
+	if !ok {
+		return false
+	}
+
+	// Remove all records of this type for this name
+	delete(zone.Records[name], qtype)
+
+	// Clean up empty structures
+	if len(zone.Records[name]) == 0 {
+		delete(zone.Records, name)
+	}
+
+	// Update metrics after releasing the zone lock to avoid deadlock
+	go c.updateMetrics()
+	return true
+}
+
+// RemoveAllPTRRecordsForName removes all PTR records that point to a given DNS name
+func (c *Cache) RemoveAllPTRRecordsForName(targetName string) {
+	targetName = dns.Fqdn(targetName)
+
+	c.mu.RLock()
+	zones := make([]*Zone, 0, len(c.zones))
+	for _, zone := range c.zones {
+		zones = append(zones, zone)
+	}
+	c.mu.RUnlock()
+
+	for _, zone := range zones {
+		zone.mu.Lock()
+		for name, types := range zone.Records {
+			if ptrRecords, exists := types[dns.TypePTR]; exists {
+				newPtrRecords := make([]dns.RR, 0, len(ptrRecords))
+				for _, rr := range ptrRecords {
+					if ptr, ok := rr.(*dns.PTR); ok {
+						if ptr.Ptr != targetName {
+							newPtrRecords = append(newPtrRecords, rr)
+						}
+					} else {
+						newPtrRecords = append(newPtrRecords, rr)
+					}
+				}
+
+				if len(newPtrRecords) != len(ptrRecords) {
+					if len(newPtrRecords) == 0 {
+						delete(zone.Records[name], dns.TypePTR)
+						if len(zone.Records[name]) == 0 {
+							delete(zone.Records, name)
+						}
+					} else {
+						zone.Records[name][dns.TypePTR] = newPtrRecords
+					}
+				}
+			}
+		}
+		zone.mu.Unlock()
+	}
+
+	// Update metrics
+	go c.updateMetrics()
+}
+
 // recordMatches checks if a record matches the target
 func (c *Cache) recordMatches(rr dns.RR, qtype uint16, target string) bool {
 	switch qtype {
