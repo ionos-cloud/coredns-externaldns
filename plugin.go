@@ -146,7 +146,18 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 		cnameRecords := p.cache.GetRecords(qname, dns.TypeCNAME)
 		if len(cnameRecords) > 0 {
 			clog.Debugf("Found %d CNAME records for %s when looking for %s", len(cnameRecords), qname, dns.TypeToString[qtype])
-			records = cnameRecords
+
+			// Start with the CNAME records
+			records = make([]dns.RR, len(cnameRecords))
+			copy(records, cnameRecords)
+
+			// Now resolve each CNAME to get the actual A/AAAA records
+			for _, cnameRR := range cnameRecords {
+				if cname, ok := cnameRR.(*dns.CNAME); ok {
+					targetRecords := p.resolveCNAMETarget(cname.Target, qtype, 5) // max 5 hops to prevent infinite loops
+					records = append(records, targetRecords...)
+				}
+			}
 		} else {
 			clog.Debugf("No CNAME records found for %s when looking for %s", qname, dns.TypeToString[qtype])
 		}
@@ -637,6 +648,43 @@ func (p *Plugin) saveZoneSerials(ctx context.Context, updatedZones []string) {
 	}
 
 	pluginLog.Debugf("Updated ConfigMap with %d zone serials", len(data))
+}
+
+// resolveCNAMETarget resolves a CNAME target to get the actual A/AAAA records
+func (p *Plugin) resolveCNAMETarget(target string, qtype uint16, maxHops int) []dns.RR {
+	if maxHops <= 0 {
+		clog.Debugf("Maximum CNAME hops reached for %s", target)
+		return nil
+	}
+
+	// First, try to get direct A/AAAA records for the target
+	targetRecords := p.cache.GetRecords(target, qtype)
+	if len(targetRecords) > 0 {
+		clog.Debugf("Found %d %s records for CNAME target %s", len(targetRecords), dns.TypeToString[qtype], target)
+		return targetRecords
+	}
+
+	// If no direct records, check if the target is also a CNAME
+	cnameRecords := p.cache.GetRecords(target, dns.TypeCNAME)
+	if len(cnameRecords) > 0 {
+		clog.Debugf("CNAME target %s is also a CNAME, following chain", target)
+		var allRecords []dns.RR
+
+		// Add the intermediate CNAME records to the response
+		allRecords = append(allRecords, cnameRecords...)
+
+		// Recursively resolve each CNAME
+		for _, cnameRR := range cnameRecords {
+			if cname, ok := cnameRR.(*dns.CNAME); ok {
+				recursiveRecords := p.resolveCNAMETarget(cname.Target, qtype, maxHops-1)
+				allRecords = append(allRecords, recursiveRecords...)
+			}
+		}
+		return allRecords
+	}
+
+	clog.Debugf("No records found for CNAME target %s", target)
+	return nil
 }
 
 // Helper functions
