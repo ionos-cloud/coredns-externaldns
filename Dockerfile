@@ -10,8 +10,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code and cmd directory
-COPY *.go ./
-COPY cmd/ ./cmd/
+COPY . .
 
 # Build the standalone CoreDNS with externaldns plugin
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o coredns-externaldns ./cmd/coredns-externaldns
