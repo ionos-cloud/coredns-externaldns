@@ -40,7 +40,7 @@ func createTestMetrics() *Metrics {
 func TestNewCache(t *testing.T) {
 	metrics := createTestMetrics()
 	cache := New(metrics)
-	
+
 	require.NotNil(t, cache)
 	assert.NotNil(t, cache.zones)
 	assert.Equal(t, metrics, cache.metrics)
@@ -49,7 +49,7 @@ func TestNewCache(t *testing.T) {
 
 func TestAddRecordBasic(t *testing.T) {
 	cache := New(createTestMetrics())
-	
+
 	// Create test A record
 	aRecord := &dns.A{
 		Hdr: dns.RR_Header{
@@ -60,10 +60,10 @@ func TestAddRecordBasic(t *testing.T) {
 		},
 		A: net.ParseIP("192.168.1.1"),
 	}
-	
+
 	// This should not hang
 	cache.AddRecord("test.example.com", dns.TypeA, aRecord)
-	
+
 	// Verify record was added
 	records := cache.GetRecords("test.example.com.", dns.TypeA)
 	assert.Len(t, records, 1)
@@ -71,7 +71,7 @@ func TestAddRecordBasic(t *testing.T) {
 
 func TestGetZones(t *testing.T) {
 	cache := New(createTestMetrics())
-	
+
 	// Add a simple record
 	aRecord := &dns.A{
 		Hdr: dns.RR_Header{
@@ -83,7 +83,7 @@ func TestGetZones(t *testing.T) {
 		A: net.ParseIP("192.168.1.1"),
 	}
 	cache.AddRecord("www.example.com", dns.TypeA, aRecord)
-	
+
 	zones := cache.GetZones()
 	assert.Contains(t, zones, "example.com.")
 }
