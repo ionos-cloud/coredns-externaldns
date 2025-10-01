@@ -1,6 +1,8 @@
 package externaldns
 
 import (
+	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -509,4 +511,220 @@ func TestWatcherRestartScenario(t *testing.T) {
 			t.Logf("Real update correctly incremented serial: %d -> %d", finalSerial, updateSerial)
 		})
 	})
+}
+
+func TestWildcardCNAMEResolution(t *testing.T) {
+	config := DefaultConfig()
+	plugin := New(config)
+
+	// Create a wildcard CNAME record: *.something -> target.example.com
+	endpoint := &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-wildcard-cname",
+			Namespace: "default",
+		},
+		Spec: externaldnsv1alpha1.DNSEndpointSpec{
+			Endpoints: []*endpointv1alpha1.Endpoint{
+				{
+					DNSName:    "*.something.example.com",
+					RecordType: "CNAME",
+					Targets:    []string{"target.example.com"},
+					RecordTTL:  300,
+				},
+			},
+		},
+	}
+
+	// Add the endpoint to the cache
+	err := plugin.OnAdd(endpoint)
+	require.NoError(t, err)
+
+	// Test Case 1: Query for A record on x.something.example.com
+	// Should return the CNAME record
+	t.Run("A query for wildcard subdomain returns CNAME", func(t *testing.T) {
+		// Mock response writer to capture the response
+		responseWriter := &mockResponseWriter{}
+
+		// Create DNS query for A record
+		req := new(dns.Msg)
+		req.SetQuestion("x.something.example.com.", dns.TypeA)
+
+		code, err := plugin.ServeDNS(context.Background(), responseWriter, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code)
+
+		// Verify we got a response
+		require.NotNil(t, responseWriter.msg)
+		assert.Len(t, responseWriter.msg.Answer, 1)
+
+		// Verify it's a CNAME record with correct values
+		cnameRecord, ok := responseWriter.msg.Answer[0].(*dns.CNAME)
+		assert.True(t, ok, "Expected CNAME record but got %T", responseWriter.msg.Answer[0])
+		assert.Equal(t, "x.something.example.com.", cnameRecord.Hdr.Name)
+		assert.Equal(t, "target.example.com.", cnameRecord.Target)
+		assert.Equal(t, uint32(300), cnameRecord.Hdr.Ttl)
+	})
+
+	// Test Case 2: Query for AAAA record on y.something.example.com
+	// Should also return the CNAME record
+	t.Run("AAAA query for wildcard subdomain returns CNAME", func(t *testing.T) {
+		responseWriter := &mockResponseWriter{}
+
+		req := new(dns.Msg)
+		req.SetQuestion("y.something.example.com.", dns.TypeAAAA)
+
+		code, err := plugin.ServeDNS(context.Background(), responseWriter, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code)
+
+		require.NotNil(t, responseWriter.msg)
+		assert.Len(t, responseWriter.msg.Answer, 1)
+
+		cnameRecord, ok := responseWriter.msg.Answer[0].(*dns.CNAME)
+		assert.True(t, ok, "Expected CNAME record but got %T", responseWriter.msg.Answer[0])
+		assert.Equal(t, "y.something.example.com.", cnameRecord.Hdr.Name)
+		assert.Equal(t, "target.example.com.", cnameRecord.Target)
+	})
+
+	// Test Case 3: Direct CNAME query should work
+	t.Run("CNAME query for wildcard subdomain returns CNAME", func(t *testing.T) {
+		responseWriter := &mockResponseWriter{}
+
+		req := new(dns.Msg)
+		req.SetQuestion("z.something.example.com.", dns.TypeCNAME)
+
+		code, err := plugin.ServeDNS(context.Background(), responseWriter, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code)
+
+		require.NotNil(t, responseWriter.msg)
+		assert.Len(t, responseWriter.msg.Answer, 1)
+
+		cnameRecord, ok := responseWriter.msg.Answer[0].(*dns.CNAME)
+		assert.True(t, ok, "Expected CNAME record but got %T", responseWriter.msg.Answer[0])
+		assert.Equal(t, "z.something.example.com.", cnameRecord.Hdr.Name)
+		assert.Equal(t, "target.example.com.", cnameRecord.Target)
+	})
+
+	// Test Case 4: Non-wildcard domain should pass to next plugin
+	t.Run("Query for non-matching domain passes to next plugin", func(t *testing.T) {
+		responseWriter := &mockResponseWriter{}
+
+		// Set up a mock next plugin
+		nextHandlerCalled := false
+		plugin.Next = &mockHandler{
+			handler: func() (int, error) {
+				nextHandlerCalled = true
+				return dns.RcodeNameError, nil
+			},
+		}
+
+		req := new(dns.Msg)
+		req.SetQuestion("unrelated.domain.com.", dns.TypeA)
+
+		code, err := plugin.ServeDNS(context.Background(), responseWriter, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, code)
+		assert.True(t, nextHandlerCalled, "Next handler should have been called")
+	})
+
+	// Test Case 5: MX query should not trigger CNAME lookup
+	t.Run("MX query for wildcard subdomain passes to next plugin when no MX record exists", func(t *testing.T) {
+		responseWriter := &mockResponseWriter{}
+
+		nextHandlerCalled := false
+		plugin.Next = &mockHandler{
+			handler: func() (int, error) {
+				nextHandlerCalled = true
+				return dns.RcodeNameError, nil
+			},
+		}
+
+		req := new(dns.Msg)
+		req.SetQuestion("mail.something.example.com.", dns.TypeMX)
+
+		code, err := plugin.ServeDNS(context.Background(), responseWriter, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, code)
+		assert.True(t, nextHandlerCalled, "Next handler should have been called for MX query")
+	})
+
+	// Test Case 6: Edge case - verify the exact scenario from the original question
+	t.Run("Specific test case: x.something with wildcard *.something CNAME", func(t *testing.T) {
+		responseWriter := &mockResponseWriter{}
+
+		// Query for x.something with A record type
+		req := new(dns.Msg)
+		req.SetQuestion("x.something.example.com.", dns.TypeA)
+
+		code, err := plugin.ServeDNS(context.Background(), responseWriter, req)
+
+		// Should return success with CNAME record, not pass to next plugin
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code)
+
+		require.NotNil(t, responseWriter.msg)
+		assert.Len(t, responseWriter.msg.Answer, 1)
+
+		// Verify we get the CNAME record, not an A record
+		cnameRecord, ok := responseWriter.msg.Answer[0].(*dns.CNAME)
+		assert.True(t, ok, "Expected CNAME record for wildcard match, but got %T", responseWriter.msg.Answer[0])
+		assert.Equal(t, "x.something.example.com.", cnameRecord.Hdr.Name)
+		assert.Equal(t, "target.example.com.", cnameRecord.Target)
+		assert.Equal(t, dns.TypeCNAME, cnameRecord.Hdr.Rrtype)
+	})
+}
+
+// Mock response writer for testing
+type mockResponseWriter struct {
+	msg *dns.Msg
+}
+
+func (m *mockResponseWriter) LocalAddr() net.Addr {
+	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:53")
+	return addr
+}
+
+func (m *mockResponseWriter) RemoteAddr() net.Addr {
+	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:12345")
+	return addr
+}
+
+func (m *mockResponseWriter) WriteMsg(msg *dns.Msg) error {
+	m.msg = msg
+	return nil
+}
+
+func (m *mockResponseWriter) Write([]byte) (int, error) {
+	return 0, nil
+}
+
+func (m *mockResponseWriter) Close() error {
+	return nil
+}
+
+func (m *mockResponseWriter) TsigStatus() error {
+	return nil
+}
+
+func (m *mockResponseWriter) TsigTimersOnly(bool) {}
+
+func (m *mockResponseWriter) Hijack() {}
+
+// Mock handler for testing next plugin behavior
+type mockHandler struct {
+	handler func() (int, error)
+}
+
+func (m *mockHandler) Name() string {
+	return "mock"
+}
+
+func (m *mockHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	return m.handler()
 }
