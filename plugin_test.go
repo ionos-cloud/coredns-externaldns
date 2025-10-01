@@ -728,3 +728,128 @@ func (m *mockHandler) Name() string {
 func (m *mockHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	return m.handler()
 }
+
+func TestZoneDetectionWithFirstDotApproach(t *testing.T) {
+	tests := []struct {
+		name         string
+		domain       string
+		expectedZone string
+	}{
+		{
+			name:         "Wildcard foo case - the original issue",
+			domain:       "*.foo.stg.test.com",
+			expectedZone: "stg.test.com.",
+		},
+		{
+			name:         "Regular foo subdomain",
+			domain:       "foo.stg.test.com",
+			expectedZone: "stg.test.com.",
+		},
+		{
+			name:         "API in staging",
+			domain:       "api.stg.test.com",
+			expectedZone: "stg.test.com.",
+		},
+		{
+			name:         "Traditional 2-level domain",
+			domain:       "example.com",
+			expectedZone: "com.",
+		},
+		{
+			name:         "Subdomain of 2-level domain",
+			domain:       "www.example.com",
+			expectedZone: "example.com.",
+		},
+		{
+			name:         "Wildcard for 2-level zone",
+			domain:       "*.example.com",
+			expectedZone: "com.",
+		},
+		{
+			name:         "Deep nesting",
+			domain:       "service.api.stg.test.com",
+			expectedZone: "api.stg.test.com.",
+		},
+		{
+			name:         "Wildcard deep nesting",
+			domain:       "*.service.api.stg.test.com",
+			expectedZone: "api.stg.test.com.",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			zone := getZone(test.domain)
+			assert.Equal(t, test.expectedZone, zone,
+				"For domain %s, expected zone %s but got %s",
+				test.domain, test.expectedZone, zone)
+		})
+	}
+}
+
+func TestSpecificZoneIssue(t *testing.T) {
+	// Test the specific issue:
+	// "i have added a record of *.foo.stg.test.com as CNAME
+	// but the log i get for notify is for zone test.com. why is that?"
+
+	t.Run("Zone notify should be for correct zone", func(t *testing.T) {
+		domain := "*.foo.stg.test.com"
+
+		// This was the OLD incorrect behavior
+		incorrectZone := "test.com."
+
+		// This should be the NEW correct behavior
+		correctZone := "stg.test.com."
+
+		actualZone := getZone(domain)
+
+		assert.Equal(t, correctZone, actualZone,
+			"Zone detection failed: expected %s, got %s", correctZone, actualZone)
+
+		assert.NotEqual(t, incorrectZone, actualZone,
+			"Zone should NOT be %s (that was the bug)", incorrectZone)
+
+		t.Logf("✅ FIXED: %s now correctly maps to zone %s (was incorrectly %s)",
+			domain, actualZone, incorrectZone)
+	})
+
+	// Test that it works end-to-end with the plugin
+	t.Run("End-to-end zone detection in plugin", func(t *testing.T) {
+		config := DefaultConfig()
+		plugin := New(config)
+
+		endpoint := &externaldnsv1alpha1.DNSEndpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-foo-cname",
+				Namespace: "default",
+			},
+			Spec: externaldnsv1alpha1.DNSEndpointSpec{
+				Endpoints: []*endpointv1alpha1.Endpoint{
+					{
+						DNSName:    "*.foo.stg.test.com",
+						RecordType: "CNAME",
+						Targets:    []string{"target.example.com"},
+						RecordTTL:  300,
+					},
+				},
+			},
+		}
+
+		// Add the endpoint - this will trigger zone detection
+		err := plugin.OnAdd(endpoint)
+		require.NoError(t, err)
+
+		// Check that the zone serial was set for the CORRECT zone
+		plugin.serialsMutex.RLock()
+		_, hasCorrectZone := plugin.zoneSerials["stg.test.com."]
+		_, hasIncorrectZone := plugin.zoneSerials["test.com."]
+		plugin.serialsMutex.RUnlock()
+
+		assert.True(t, hasCorrectZone,
+			"Should have zone serial for correct zone stg.test.com.")
+		assert.False(t, hasIncorrectZone,
+			"Should NOT have zone serial for incorrect zone test.com.")
+
+		t.Logf("✅ Zone notify will now be for: stg.test.com. (not test.com.)")
+	})
+}
