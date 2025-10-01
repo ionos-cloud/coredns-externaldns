@@ -133,6 +133,15 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 
 	// Try to get records from cache
 	records := p.cache.GetRecords(qname, qtype)
+
+	// If no direct records found and querying for A or AAAA, check for CNAME records
+	if len(records) == 0 && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
+		cnameRecords := p.cache.GetRecords(qname, dns.TypeCNAME)
+		if len(cnameRecords) > 0 {
+			records = cnameRecords
+		}
+	}
+
 	if len(records) == 0 {
 		// No records found, pass to next plugin
 		return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
