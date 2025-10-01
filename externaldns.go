@@ -66,6 +66,7 @@ type RecordRef struct {
 	Name   string
 	Type   uint16
 	Target string
+	TTL    uint32 // Store the original TTL
 }
 
 // DNSCache holds DNS records in memory
@@ -196,6 +197,18 @@ func (c *DNSCache) AddRecordWithEndpoint(name string, qtype uint16, rr dns.RR, e
 		zone.Records[name] = make(map[uint16][]dns.RR)
 	}
 
+	// Check if the record already exists to prevent duplicates
+	// We compare name, type, and target - TTL differences are not considered duplicates in this context
+	records := zone.Records[name][qtype]
+	for i, existingRR := range records {
+		if c.recordMatches(existingRR, normalizedTarget) {
+			// Same target already exists, replace with new record (potentially different TTL)
+			log.Debugf("Replacing existing record with updated TTL: %s %s -> %s", name, dns.TypeToString[qtype], rr.String())
+			zone.Records[name][qtype][i] = rr
+			return
+		}
+	}
+
 	zone.Records[name][qtype] = append(zone.Records[name][qtype], rr)
 
 	// Track record ownership using structured reference
@@ -204,6 +217,7 @@ func (c *DNSCache) AddRecordWithEndpoint(name string, qtype uint16, rr dns.RR, e
 		Name:   name,
 		Type:   qtype,
 		Target: normalizedTarget,
+		TTL:    rr.Header().Ttl, // Store the actual TTL from the created record
 	}
 	c.endpointRecords[endpointKey] = append(c.endpointRecords[endpointKey], recordRef)
 
@@ -230,6 +244,37 @@ func (c *DNSCache) AddRecord(name string, qtype uint16, rr dns.RR) {
 	// Initialize domain records if needed
 	if zone.Records[name] == nil {
 		zone.Records[name] = make(map[uint16][]dns.RR)
+	}
+
+	// Check if the record already exists to prevent duplicates
+	// We need to extract target from the RR for comparison
+	records := zone.Records[name][qtype]
+	for i, existingRR := range records {
+		// For AddRecord, we need to extract the target from the RR
+		var target string
+		switch rr := rr.(type) {
+		case *dns.A:
+			target = rr.A.String()
+		case *dns.AAAA:
+			target = rr.AAAA.String()
+		case *dns.CNAME:
+			target = rr.Target
+		case *dns.PTR:
+			target = rr.Ptr
+		default:
+			// For other types, fall back to string comparison
+			if rr.String() == existingRR.String() {
+				log.Debugf("Record already exists, skipping duplicate: %s %s -> %s", name, dns.TypeToString[qtype], rr.String())
+				return
+			}
+			continue
+		}
+		if c.recordMatches(existingRR, target) {
+			// Same target already exists, replace with new record (potentially different TTL)
+			log.Debugf("Replacing existing record with updated TTL: %s %s -> %s", name, dns.TypeToString[qtype], rr.String())
+			zone.Records[name][qtype][i] = rr
+			return
+		}
 	}
 
 	zone.Records[name][qtype] = append(zone.Records[name][qtype], rr)
@@ -720,8 +765,22 @@ func (e *ExternalDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 		parts := strings.Split(qname, ".")
 		for i := 1; i < len(parts); i++ {
 			wildcard := "*." + strings.Join(parts[i:], ".")
-			records = e.cache.GetRecords(wildcard, qtype)
-			if len(records) > 0 {
+			wildcardRecords := e.cache.GetRecords(wildcard, qtype)
+
+			// If no records found and not CNAME, also check for CNAME records at the wildcard
+			if len(wildcardRecords) == 0 && qtype != dns.TypeCNAME {
+				wildcardRecords = e.cache.GetRecords(wildcard, dns.TypeCNAME)
+			}
+
+			if len(wildcardRecords) > 0 {
+				// Rewrite wildcard records to use the queried name
+				records = make([]dns.RR, len(wildcardRecords))
+				for j, rr := range wildcardRecords {
+					// Clone the record and update the name to match the query
+					records[j] = dns.Copy(rr)
+					records[j].Header().Name = qname
+				}
+				log.Debugf("Found wildcard match %s for query %s, returning %d rewritten records", wildcard, qname, len(records))
 				break
 			}
 		}
@@ -1169,6 +1228,7 @@ func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool, 
 				Name:   getRecordName(ep.DNSName),
 				Type:   qtype,
 				Target: normalizedTarget,
+				TTL:    ttl, // Store the TTL used for this record
 			}
 			refs = append(refs, ref)
 
@@ -1187,8 +1247,14 @@ func (e *ExternalDNS) addEndpointToCache(ep *endpoint.Endpoint, createPTR bool, 
 func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) []RecordRef {
 	refs := make([]RecordRef, 0)
 
+	// Calculate the TTL for this endpoint
+	ttl := e.ttl
+	if ep.RecordTTL > 0 {
+		ttl = uint32(ep.RecordTTL)
+	}
+
 	// Handle main record
-	dnsName := dns.Fqdn(ep.DNSName)
+	dnsName := getRecordName(ep.DNSName) // Use normalized name for consistency
 
 	switch ep.RecordType {
 	case "A":
@@ -1202,6 +1268,7 @@ func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) [
 				Name:   dnsName,
 				Type:   dns.TypeA,
 				Target: target,
+				TTL:    ttl,
 			})
 		}
 	case "AAAA":
@@ -1215,6 +1282,7 @@ func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) [
 				Name:   dnsName,
 				Type:   dns.TypeAAAA,
 				Target: target,
+				TTL:    ttl,
 			})
 		}
 	case "CNAME":
@@ -1224,6 +1292,7 @@ func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) [
 				Name:   dnsName,
 				Type:   dns.TypeCNAME,
 				Target: dns.Fqdn(ep.Targets[0]),
+				TTL:    ttl,
 			})
 		}
 	}
@@ -1250,6 +1319,7 @@ func (e *ExternalDNS) collectRecordRefs(ep *endpoint.Endpoint, createPTR bool) [
 				Name:   ptrName,
 				Type:   dns.TypePTR,
 				Target: dnsName,
+				TTL:    ttl,
 			})
 		}
 	}
@@ -1306,11 +1376,17 @@ func (e *ExternalDNS) addRecordFromRef(ref RecordRef, endpointKey string) {
 
 // createDNSRecordFromRef creates a DNS record from a RecordRef
 func (e *ExternalDNS) createDNSRecordFromRef(ref RecordRef) dns.RR {
+	// Use the TTL from the RecordRef, fallback to plugin TTL if not set
+	ttl := ref.TTL
+	if ttl == 0 {
+		ttl = e.ttl
+	}
+
 	header := dns.RR_Header{
 		Name:   ref.Name,
 		Rrtype: ref.Type,
 		Class:  dns.ClassINET,
-		Ttl:    e.ttl,
+		Ttl:    ttl,
 	}
 
 	switch ref.Type {
@@ -1486,6 +1562,7 @@ func (e *ExternalDNS) createAndAddPTRRecordWithRefs(hostname, ipAddr string, ttl
 		Name:   normalizedPtrName,
 		Type:   dns.TypePTR,
 		Target: dns.Fqdn(hostname),
+		TTL:    ttl,
 	}
 	refs = append(refs, ref)
 
