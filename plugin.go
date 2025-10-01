@@ -115,36 +115,46 @@ func (p *Plugin) Name() string {
 // ServeDNS implements the plugin.Handler interface
 func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	if len(r.Question) == 0 {
+		clog.Debug("No questions in DNS request")
 		return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
 	}
 
 	q := r.Question[0]
 	qname := q.Name
 	qtype := q.Qtype
+	zone := getZone(qname)
+
+	clog.Debugf("DNS request: qname=%s, qtype=%s, zone=%s", qname, dns.TypeToString[qtype], zone)
 
 	// Update metrics
 	if p.metrics.RequestCount != nil {
-		p.metrics.RequestCount.WithLabelValues(proto(w), dns.TypeToString[qtype], getZone(qname)).Inc()
+		p.metrics.RequestCount.WithLabelValues(proto(w), dns.TypeToString[qtype], zone).Inc()
 	}
 
 	// If transfer is not loaded, we'll see these, answer with refused (no transfer allowed).
 	if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
+		clog.Debugf("Zone transfer request refused for %s (type %s)", qname, dns.TypeToString[qtype])
 		return dns.RcodeRefused, nil
 	}
 
 	// Try to get records from cache
 	records := p.cache.GetRecords(qname, qtype)
+	clog.Debugf("Cache lookup for %s %s returned %d records", qname, dns.TypeToString[qtype], len(records))
 
 	// If no direct records found and querying for A or AAAA, check for CNAME records
 	if len(records) == 0 && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
 		cnameRecords := p.cache.GetRecords(qname, dns.TypeCNAME)
 		if len(cnameRecords) > 0 {
+			clog.Debugf("Found %d CNAME records for %s when looking for %s", len(cnameRecords), qname, dns.TypeToString[qtype])
 			records = cnameRecords
+		} else {
+			clog.Debugf("No CNAME records found for %s when looking for %s", qname, dns.TypeToString[qtype])
 		}
 	}
 
 	if len(records) == 0 {
 		// No records found, pass to next plugin
+		clog.Debugf("No records found for %s %s, passing to next plugin", qname, dns.TypeToString[qtype])
 		return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
 	}
 
@@ -154,9 +164,14 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	m.Authoritative = true
 	m.Answer = records
 
+	clog.Debugf("Responding to %s %s with %d records (authoritative)", qname, dns.TypeToString[qtype], len(records))
+
 	if err := w.WriteMsg(m); err != nil {
+		clog.Errorf("Failed to write DNS response for %s %s: %v", qname, dns.TypeToString[qtype], err)
 		return dns.RcodeServerFailure, err
 	}
+
+	clog.Debugf("Successfully responded to %s %s", qname, dns.TypeToString[qtype])
 	return dns.RcodeSuccess, nil
 }
 
