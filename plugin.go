@@ -277,7 +277,9 @@ func (p *Plugin) OnAdd(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 			pluginLog.Errorf("Failed to add endpoint record: %v", err)
 			continue
 		}
-		zones[getZone(ep.DNSName)] = true
+		zone := getZone(ep.DNSName)
+		pluginLog.Debugf("OnAdd: DNSName=%s -> Zone=%s", ep.DNSName, zone)
+		zones[zone] = true
 	}
 
 	// Update zone serials atomically - only if the serial is actually newer
@@ -333,7 +335,9 @@ func (p *Plugin) OnUpdate(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 			pluginLog.Errorf("Failed to add endpoint record during update: %v", err)
 			continue
 		}
-		zones[getZone(ep.DNSName)] = true
+		zone := getZone(ep.DNSName)
+		pluginLog.Debugf("OnUpdate: DNSName=%s -> Zone=%s", ep.DNSName, zone)
+		zones[zone] = true
 	}
 
 	// Update zone serials
@@ -641,6 +645,7 @@ func (p *Plugin) saveZoneSerials(ctx context.Context, updatedZones []string) {
 	// Notify others of zone changes
 	if p.transfer != nil {
 		for _, zone := range updatedZones {
+			pluginLog.Debugf("Notifying transfer plugin for zone: %s", zone)
 			if err := p.transfer.Notify(zone); err != nil {
 				pluginLog.Warningf("Failed to notify transfer of serial update for zone %s: %v", zone, err)
 			}

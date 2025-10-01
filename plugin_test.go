@@ -2,7 +2,9 @@ package externaldns
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +14,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
+	"sigs.k8s.io/external-dns/endpoint"
 	endpointv1alpha1 "sigs.k8s.io/external-dns/endpoint"
+
+	"github.com/ionos-cloud/coredns-externaldns/internal/cache"
+	dnsbuilder "github.com/ionos-cloud/coredns-externaldns/internal/dns"
 )
 
 func TestNewPlugin(t *testing.T) {
@@ -852,4 +858,920 @@ func TestSpecificZoneIssue(t *testing.T) {
 
 		t.Logf("✅ Zone notify will now be for: stg.test.com. (not test.com.)")
 	})
+}
+
+// Helper function to create a test plugin
+func createTestPlugin() *Plugin {
+	config := &Config{
+		TTL:       3600,
+		Namespace: "default",
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-configmap",
+			Namespace: "default",
+		},
+	}
+
+	metrics := &cache.Metrics{}
+
+	return &Plugin{
+		config:        config,
+		cache:         cache.New(metrics),
+		recordBuilder: dnsbuilder.NewRecordBuilder(),
+		zoneSerials:   make(map[string]uint32),
+		metrics:       metrics,
+		ctx:           context.Background(),
+	}
+}
+
+// Helper function to create a DNSEndpoint
+func createDNSEndpoint(name, namespace, dnsName, recordType string, targets []string) *externaldnsv1alpha1.DNSEndpoint {
+	return &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: externaldnsv1alpha1.DNSEndpointSpec{
+			Endpoints: []*endpoint.Endpoint{
+				{
+					DNSName:    dnsName,
+					RecordType: recordType,
+					Targets:    targets,
+				},
+			},
+		},
+	}
+}
+
+func TestCNAMEUpdateNoDuplication(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Create initial DNSEndpoint with a CNAME record
+	initialEndpoint := createDNSEndpoint(
+		"test-endpoint",
+		"default",
+		"sdf.foo.stg.test.com",
+		"CNAME",
+		[]string{"mgmt.stg.test.com"},
+	)
+
+	// Add the initial record
+	err := plugin.OnAdd(initialEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add initial endpoint: %v", err)
+	}
+
+	// Verify initial record exists
+	records := plugin.cache.GetRecords("sdf.foo.stg.test.com.", dns.TypeCNAME)
+	if len(records) != 1 {
+		t.Fatalf("Expected 1 CNAME record, got %d", len(records))
+	}
+
+	// Verify the initial target
+	if cname, ok := records[0].(*dns.CNAME); ok {
+		expectedTarget := "mgmt.stg.test.com."
+		if cname.Target != expectedTarget {
+			t.Fatalf("Expected initial CNAME target %s, got %s", expectedTarget, cname.Target)
+		}
+	} else {
+		t.Fatalf("Record is not a CNAME record")
+	}
+
+	// Create updated DNSEndpoint with different CNAME target
+	updatedEndpoint := createDNSEndpoint(
+		"test-endpoint",
+		"default",
+		"sdf.foo.stg.test.com",
+		"CNAME",
+		[]string{"ntp.stg.test.com"},
+	)
+
+	// Update the record
+	err = plugin.OnUpdate(updatedEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to update endpoint: %v", err)
+	}
+
+	// Verify only one CNAME record exists with the new target
+	records = plugin.cache.GetRecords("sdf.foo.stg.test.com.", dns.TypeCNAME)
+	if len(records) != 1 {
+		t.Fatalf("Expected 1 CNAME record after update, got %d", len(records))
+	}
+
+	// Verify the record has the correct target
+	if cname, ok := records[0].(*dns.CNAME); ok {
+		expectedTarget := "ntp.stg.test.com."
+		if cname.Target != expectedTarget {
+			t.Fatalf("Expected CNAME target %s, got %s", expectedTarget, cname.Target)
+		}
+	} else {
+		t.Fatalf("Record is not a CNAME record")
+	}
+}
+
+func TestMultipleCNAMETargetsUpdateNoDuplication(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Create initial DNSEndpoint with multiple CNAME targets
+	initialEndpoint := createDNSEndpoint(
+		"test-endpoint",
+		"default",
+		"test.example.com",
+		"CNAME",
+		[]string{"target1.example.com", "target2.example.com"},
+	)
+
+	// Add the initial records
+	err := plugin.OnAdd(initialEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add initial endpoint: %v", err)
+	}
+
+	// Verify initial records exist
+	records := plugin.cache.GetRecords("test.example.com.", dns.TypeCNAME)
+	if len(records) != 2 {
+		t.Fatalf("Expected 2 CNAME records, got %d", len(records))
+	}
+
+	// Create updated DNSEndpoint with different CNAME targets
+	updatedEndpoint := createDNSEndpoint(
+		"test-endpoint",
+		"default",
+		"test.example.com",
+		"CNAME",
+		[]string{"newtarget.example.com"},
+	)
+
+	// Update the records
+	err = plugin.OnUpdate(updatedEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to update endpoint: %v", err)
+	}
+
+	// Verify only one CNAME record exists with the new target
+	records = plugin.cache.GetRecords("test.example.com.", dns.TypeCNAME)
+	if len(records) != 1 {
+		t.Fatalf("Expected 1 CNAME record after update, got %d", len(records))
+	}
+
+	// Verify the record has the correct target
+	if cname, ok := records[0].(*dns.CNAME); ok {
+		expectedTarget := "newtarget.example.com."
+		if cname.Target != expectedTarget {
+			t.Fatalf("Expected CNAME target %s, got %s", expectedTarget, cname.Target)
+		}
+	} else {
+		t.Fatalf("Record is not a CNAME record")
+	}
+}
+
+func TestARecordUpdateNoDuplication(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Create initial DNSEndpoint with A records
+	initialEndpoint := createDNSEndpoint(
+		"test-endpoint",
+		"default",
+		"web.example.com",
+		"A",
+		[]string{"192.168.1.1", "192.168.1.2"},
+	)
+
+	// Add the initial records
+	err := plugin.OnAdd(initialEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add initial endpoint: %v", err)
+	}
+
+	// Verify initial records exist
+	records := plugin.cache.GetRecords("web.example.com.", dns.TypeA)
+	if len(records) != 2 {
+		t.Fatalf("Expected 2 A records, got %d", len(records))
+	}
+
+	// Create updated DNSEndpoint with different A record targets
+	updatedEndpoint := createDNSEndpoint(
+		"test-endpoint",
+		"default",
+		"web.example.com",
+		"A",
+		[]string{"10.0.0.1"},
+	)
+
+	// Update the records
+	err = plugin.OnUpdate(updatedEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to update endpoint: %v", err)
+	}
+
+	// Verify only one A record exists with the new target
+	records = plugin.cache.GetRecords("web.example.com.", dns.TypeA)
+	if len(records) != 1 {
+		t.Fatalf("Expected 1 A record after update, got %d", len(records))
+	}
+
+	// Verify the record has the correct target
+	if a, ok := records[0].(*dns.A); ok {
+		expectedIP := "10.0.0.1"
+		if a.A.String() != expectedIP {
+			t.Fatalf("Expected A record IP %s, got %s", expectedIP, a.A.String())
+		}
+	} else {
+		t.Fatalf("Record is not an A record")
+	}
+}
+
+func TestMultipleEndpointsUpdateNoDuplication(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Create initial DNSEndpoint with multiple endpoints
+	initialEndpoint := &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-endpoint",
+			Namespace: "default",
+		},
+		Spec: externaldnsv1alpha1.DNSEndpointSpec{
+			Endpoints: []*endpoint.Endpoint{
+				{
+					DNSName:    "app.example.com",
+					RecordType: "CNAME",
+					Targets:    []string{"old-app.example.com"},
+				},
+				{
+					DNSName:    "api.example.com",
+					RecordType: "A",
+					Targets:    []string{"192.168.1.10"},
+				},
+			},
+		},
+	}
+
+	// Add the initial records
+	err := plugin.OnAdd(initialEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add initial endpoint: %v", err)
+	}
+
+	// Verify initial records exist
+	cnameRecords := plugin.cache.GetRecords("app.example.com.", dns.TypeCNAME)
+	aRecords := plugin.cache.GetRecords("api.example.com.", dns.TypeA)
+	if len(cnameRecords) != 1 || len(aRecords) != 1 {
+		t.Fatalf("Expected 1 CNAME and 1 A record, got %d CNAME and %d A", len(cnameRecords), len(aRecords))
+	}
+
+	// Create updated DNSEndpoint with different targets
+	updatedEndpoint := &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-endpoint",
+			Namespace: "default",
+		},
+		Spec: externaldnsv1alpha1.DNSEndpointSpec{
+			Endpoints: []*endpoint.Endpoint{
+				{
+					DNSName:    "app.example.com",
+					RecordType: "CNAME",
+					Targets:    []string{"new-app.example.com"},
+				},
+				{
+					DNSName:    "api.example.com",
+					RecordType: "A",
+					Targets:    []string{"10.0.0.20"},
+				},
+			},
+		},
+	}
+
+	// Update the records
+	err = plugin.OnUpdate(updatedEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to update endpoint: %v", err)
+	}
+
+	// Verify only new records exist
+	cnameRecords = plugin.cache.GetRecords("app.example.com.", dns.TypeCNAME)
+	aRecords = plugin.cache.GetRecords("api.example.com.", dns.TypeA)
+	if len(cnameRecords) != 1 || len(aRecords) != 1 {
+		t.Fatalf("Expected 1 CNAME and 1 A record after update, got %d CNAME and %d A", len(cnameRecords), len(aRecords))
+	}
+
+	// Verify the CNAME record has the correct target
+	if cname, ok := cnameRecords[0].(*dns.CNAME); ok {
+		expectedTarget := "new-app.example.com."
+		if cname.Target != expectedTarget {
+			t.Fatalf("Expected CNAME target %s, got %s", expectedTarget, cname.Target)
+		}
+	} else {
+		t.Fatalf("Record is not a CNAME record")
+	}
+
+	// Verify the A record has the correct target
+	if a, ok := aRecords[0].(*dns.A); ok {
+		expectedIP := "10.0.0.20"
+		if a.A.String() != expectedIP {
+			t.Fatalf("Expected A record IP %s, got %s", expectedIP, a.A.String())
+		}
+	} else {
+		t.Fatalf("Record is not an A record")
+	}
+}
+
+func TestConcurrentUpdatesNoDuplication(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Create initial DNSEndpoint
+	initialEndpoint := createDNSEndpoint(
+		"test-endpoint",
+		"default",
+		"concurrent.example.com",
+		"CNAME",
+		[]string{"initial.example.com"},
+	)
+
+	// Add the initial record
+	err := plugin.OnAdd(initialEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add initial endpoint: %v", err)
+	}
+
+	// Perform sequential updates to avoid race conditions in testing
+	// (In real scenarios, Kubernetes ensures updates are sequential per resource)
+	numUpdates := 5
+	for i := 0; i < numUpdates; i++ {
+		updatedEndpoint := createDNSEndpoint(
+			"test-endpoint",
+			"default",
+			"concurrent.example.com",
+			"CNAME",
+			[]string{fmt.Sprintf("target-%d.example.com", i)},
+		)
+
+		err := plugin.OnUpdate(updatedEndpoint)
+		if err != nil {
+			t.Fatalf("Failed to update endpoint at iteration %d: %v", i, err)
+		}
+
+		// Verify only one record exists after each update
+		records := plugin.cache.GetRecords("concurrent.example.com.", dns.TypeCNAME)
+		if len(records) != 1 {
+			t.Fatalf("Expected 1 CNAME record after update %d, got %d", i, len(records))
+		}
+	}
+
+	// Final verification
+	records := plugin.cache.GetRecords("concurrent.example.com.", dns.TypeCNAME)
+	if len(records) != 1 {
+		t.Fatalf("Expected 1 CNAME record after all updates, got %d", len(records))
+	}
+
+	// Verify the final record has the last target
+	if cname, ok := records[0].(*dns.CNAME); ok {
+		expectedTarget := "target-4.example.com."
+		if cname.Target != expectedTarget {
+			t.Fatalf("Expected final CNAME target %s, got %s", expectedTarget, cname.Target)
+		}
+	} else {
+		t.Fatalf("Record is not a CNAME record")
+	}
+}
+
+func TestPTRRecordCleanupDuringUpdate(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Create initial DNSEndpoint with PTR creation annotation
+	initialEndpoint := &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-endpoint",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"coredns-externaldns.ionos.cloud/create-ptr": "true",
+			},
+		},
+		Spec: externaldnsv1alpha1.DNSEndpointSpec{
+			Endpoints: []*endpoint.Endpoint{
+				{
+					DNSName:    "host.example.com",
+					RecordType: "A",
+					Targets:    []string{"192.168.1.100"},
+				},
+			},
+		},
+	}
+
+	// Add the initial record (this should create both A and PTR records)
+	err := plugin.OnAdd(initialEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add initial endpoint: %v", err)
+	}
+
+	// Verify A record exists
+	aRecords := plugin.cache.GetRecords("host.example.com.", dns.TypeA)
+	if len(aRecords) != 1 {
+		t.Fatalf("Expected 1 A record, got %d", len(aRecords))
+	}
+
+	// Verify PTR record exists
+	ptrName := "100.1.168.192.in-addr.arpa."
+	ptrRecords := plugin.cache.GetRecords(ptrName, dns.TypePTR)
+	if len(ptrRecords) != 1 {
+		t.Fatalf("Expected 1 PTR record, got %d", len(ptrRecords))
+	}
+
+	// Create updated DNSEndpoint with different IP
+	updatedEndpoint := &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-endpoint",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"coredns-externaldns.ionos.cloud/create-ptr": "true",
+			},
+		},
+		Spec: externaldnsv1alpha1.DNSEndpointSpec{
+			Endpoints: []*endpoint.Endpoint{
+				{
+					DNSName:    "host.example.com",
+					RecordType: "A",
+					Targets:    []string{"10.0.0.50"},
+				},
+			},
+		},
+	}
+
+	// Update the record
+	err = plugin.OnUpdate(updatedEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to update endpoint: %v", err)
+	}
+
+	// Verify A record is updated
+	aRecords = plugin.cache.GetRecords("host.example.com.", dns.TypeA)
+	if len(aRecords) != 1 {
+		t.Fatalf("Expected 1 A record after update, got %d", len(aRecords))
+	}
+
+	if a, ok := aRecords[0].(*dns.A); ok {
+		expectedIP := "10.0.0.50"
+		if a.A.String() != expectedIP {
+			t.Fatalf("Expected A record IP %s, got %s", expectedIP, a.A.String())
+		}
+	} else {
+		t.Fatalf("Record is not an A record")
+	}
+
+	// Verify old PTR record is cleaned up
+	oldPtrRecords := plugin.cache.GetRecords(ptrName, dns.TypePTR)
+	if len(oldPtrRecords) != 0 {
+		t.Fatalf("Expected 0 old PTR records after update, got %d", len(oldPtrRecords))
+	}
+
+	// Verify new PTR record exists
+	newPtrName := "50.0.0.10.in-addr.arpa."
+	newPtrRecords := plugin.cache.GetRecords(newPtrName, dns.TypePTR)
+	if len(newPtrRecords) != 1 {
+		t.Fatalf("Expected 1 new PTR record after update, got %d", len(newPtrRecords))
+	}
+}
+
+// TestOriginalScenarioReproduction reproduces the exact scenario from the user's issue
+func TestOriginalScenarioReproduction(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Simulate the original scenario: sdf.foo.stg.test.com pointing to mgmt.stg.test.com
+	initialEndpoint := createDNSEndpoint(
+		"user-endpoint",
+		"default",
+		"sdf.foo.stg.test.com",
+		"CNAME",
+		[]string{"mgmt.stg.test.com"},
+	)
+
+	// Add the initial record
+	err := plugin.OnAdd(initialEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add initial endpoint: %v", err)
+	}
+
+	// Verify initial record exists
+	records := plugin.cache.GetRecords("sdf.foo.stg.test.com.", dns.TypeCNAME)
+	if len(records) != 1 {
+		t.Fatalf("Expected 1 CNAME record initially, got %d", len(records))
+	}
+
+	// Update to point to ntp.stg.test.com (reproducing the user's scenario)
+	updatedEndpoint := createDNSEndpoint(
+		"user-endpoint",
+		"default",
+		"sdf.foo.stg.test.com",
+		"CNAME",
+		[]string{"ntp.stg.test.com"},
+	)
+
+	// Update the record
+	err = plugin.OnUpdate(updatedEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to update endpoint: %v", err)
+	}
+
+	// Verify only one CNAME record exists (no duplication like in the user's issue)
+	records = plugin.cache.GetRecords("sdf.foo.stg.test.com.", dns.TypeCNAME)
+	if len(records) != 1 {
+		t.Fatalf("Expected exactly 1 CNAME record after update, got %d (this would have been 2 with the bug)", len(records))
+	}
+
+	// Verify the record has the correct updated target
+	if cname, ok := records[0].(*dns.CNAME); ok {
+		expectedTarget := "ntp.stg.test.com."
+		if cname.Target != expectedTarget {
+			t.Fatalf("Expected CNAME target %s, got %s", expectedTarget, cname.Target)
+		}
+	} else {
+		t.Fatalf("Record is not a CNAME record")
+	}
+
+	// Additional verification: ensure the old target is completely gone
+	// by checking the raw string representation doesn't contain the old target
+	recordStr := records[0].String()
+	if strings.Contains(recordStr, "mgmt.stg.test.com") {
+		t.Fatalf("Old target still present in record: %s", recordStr)
+	}
+
+	// Verify the new target is present
+	if !strings.Contains(recordStr, "ntp.stg.test.com") {
+		t.Fatalf("New target not found in record: %s", recordStr)
+	}
+}
+
+// TestCNAMEResolutionToARecord tests that when querying for A record but getting CNAME,
+// the DNS server resolves the CNAME and returns both CNAME and A records
+func TestCNAMEResolutionToARecord(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// First, add an A record for the target
+	targetEndpoint := createDNSEndpoint(
+		"target-endpoint",
+		"default",
+		"ntp.stg.test.com",
+		"A",
+		[]string{"192.168.1.100"},
+	)
+	err := plugin.OnAdd(targetEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add target A record: %v", err)
+	}
+
+	// Then add a CNAME that points to the target
+	cnameEndpoint := createDNSEndpoint(
+		"cname-endpoint",
+		"default",
+		"sdf.foo.stg.test.com",
+		"CNAME",
+		[]string{"ntp.stg.test.com"},
+	)
+	err = plugin.OnAdd(cnameEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add CNAME record: %v", err)
+	}
+
+	// Now simulate a DNS query for A record of the CNAME name
+	// Create a DNS request for A record
+	req := new(dns.Msg)
+	req.SetQuestion("sdf.foo.stg.test.com.", dns.TypeA)
+
+	// Create a mock response writer
+	writer := &mockResponseWriter{}
+
+	// Call ServeDNS
+	rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+	if err != nil {
+		t.Fatalf("ServeDNS returned error: %v", err)
+	}
+
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("Expected DNS success, got rcode: %d", rcode)
+	}
+
+	// Verify the response contains both CNAME and A records
+	if writer.msg == nil {
+		t.Fatalf("No response message written")
+	}
+
+	answers := writer.msg.Answer
+	if len(answers) < 2 {
+		t.Fatalf("Expected at least 2 records (CNAME + A), got %d", len(answers))
+	}
+
+	// Verify we have a CNAME record
+	var foundCNAME, foundA bool
+	var cnameTarget, aRecord string
+
+	for _, rr := range answers {
+		switch v := rr.(type) {
+		case *dns.CNAME:
+			foundCNAME = true
+			cnameTarget = v.Target
+		case *dns.A:
+			foundA = true
+			aRecord = v.A.String()
+		}
+	}
+
+	if !foundCNAME {
+		t.Fatalf("Expected CNAME record in response")
+	}
+
+	if !foundA {
+		t.Fatalf("Expected A record in response (CNAME resolution)")
+	}
+
+	// Verify the CNAME points to the correct target
+	expectedCNAMETarget := "ntp.stg.test.com."
+	if cnameTarget != expectedCNAMETarget {
+		t.Fatalf("Expected CNAME target %s, got %s", expectedCNAMETarget, cnameTarget)
+	}
+
+	// Verify the A record has the correct IP
+	expectedIP := "192.168.1.100"
+	if aRecord != expectedIP {
+		t.Fatalf("Expected A record IP %s, got %s", expectedIP, aRecord)
+	}
+}
+
+// TestCNAMEChainResolution tests resolving a chain of CNAME records
+func TestCNAMEChainResolution(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Create a chain: alias -> intermediate -> target -> A record
+	// Final A record
+	targetEndpoint := createDNSEndpoint(
+		"target-endpoint",
+		"default",
+		"final.example.com",
+		"A",
+		[]string{"10.0.0.1"},
+	)
+	err := plugin.OnAdd(targetEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add target A record: %v", err)
+	}
+
+	// Intermediate CNAME
+	intermediateEndpoint := createDNSEndpoint(
+		"intermediate-endpoint",
+		"default",
+		"intermediate.example.com",
+		"CNAME",
+		[]string{"final.example.com"},
+	)
+	err = plugin.OnAdd(intermediateEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add intermediate CNAME: %v", err)
+	}
+
+	// Alias CNAME
+	aliasEndpoint := createDNSEndpoint(
+		"alias-endpoint",
+		"default",
+		"alias.example.com",
+		"CNAME",
+		[]string{"intermediate.example.com"},
+	)
+	err = plugin.OnAdd(aliasEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add alias CNAME: %v", err)
+	}
+
+	// Query for A record of the alias
+	req := new(dns.Msg)
+	req.SetQuestion("alias.example.com.", dns.TypeA)
+
+	writer := &mockResponseWriter{}
+	rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+	if err != nil {
+		t.Fatalf("ServeDNS returned error: %v", err)
+	}
+
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("Expected DNS success, got rcode: %d", rcode)
+	}
+
+	// Verify the response contains the entire CNAME chain + final A record
+	answers := writer.msg.Answer
+	if len(answers) < 3 {
+		t.Fatalf("Expected at least 3 records (alias CNAME + intermediate CNAME + A), got %d", len(answers))
+	}
+
+	// Count record types
+	cnameCount := 0
+	aCount := 0
+	finalIP := ""
+
+	for _, rr := range answers {
+		switch v := rr.(type) {
+		case *dns.CNAME:
+			cnameCount++
+		case *dns.A:
+			aCount++
+			finalIP = v.A.String()
+		}
+	}
+
+	if cnameCount < 2 {
+		t.Fatalf("Expected at least 2 CNAME records in chain, got %d", cnameCount)
+	}
+
+	if aCount != 1 {
+		t.Fatalf("Expected exactly 1 A record, got %d", aCount)
+	}
+
+	// Verify the final IP is correct
+	expectedIP := "10.0.0.1"
+	if finalIP != expectedIP {
+		t.Fatalf("Expected final IP %s, got %s", expectedIP, finalIP)
+	}
+}
+
+// TestDirectARecordQuery tests that direct A record queries still work normally
+func TestDirectARecordQuery(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Add a direct A record
+	endpoint := createDNSEndpoint(
+		"direct-endpoint",
+		"default",
+		"direct.example.com",
+		"A",
+		[]string{"172.16.0.1"},
+	)
+	err := plugin.OnAdd(endpoint)
+	if err != nil {
+		t.Fatalf("Failed to add direct A record: %v", err)
+	}
+
+	// Query for A record
+	req := new(dns.Msg)
+	req.SetQuestion("direct.example.com.", dns.TypeA)
+
+	writer := &mockResponseWriter{}
+	rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+	if err != nil {
+		t.Fatalf("ServeDNS returned error: %v", err)
+	}
+
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("Expected DNS success, got rcode: %d", rcode)
+	}
+
+	// Verify we get exactly one A record
+	answers := writer.msg.Answer
+	if len(answers) != 1 {
+		t.Fatalf("Expected exactly 1 A record, got %d", len(answers))
+	}
+
+	if a, ok := answers[0].(*dns.A); ok {
+		expectedIP := "172.16.0.1"
+		if a.A.String() != expectedIP {
+			t.Fatalf("Expected IP %s, got %s", expectedIP, a.A.String())
+		}
+	} else {
+		t.Fatalf("Expected A record, got %T", answers[0])
+	}
+}
+
+// TestDirectCNAMEQuery tests that direct CNAME record queries work normally
+func TestDirectCNAMEQuery(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Add a CNAME record
+	endpoint := createDNSEndpoint(
+		"cname-endpoint",
+		"default",
+		"alias.example.com",
+		"CNAME",
+		[]string{"target.example.com"},
+	)
+	err := plugin.OnAdd(endpoint)
+	if err != nil {
+		t.Fatalf("Failed to add CNAME record: %v", err)
+	}
+
+	// Query for CNAME record
+	req := new(dns.Msg)
+	req.SetQuestion("alias.example.com.", dns.TypeCNAME)
+
+	writer := &mockResponseWriter{}
+	rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+	if err != nil {
+		t.Fatalf("ServeDNS returned error: %v", err)
+	}
+
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("Expected DNS success, got rcode: %d", rcode)
+	}
+
+	// Verify we get exactly one CNAME record
+	answers := writer.msg.Answer
+	if len(answers) != 1 {
+		t.Fatalf("Expected exactly 1 CNAME record, got %d", len(answers))
+	}
+
+	if cname, ok := answers[0].(*dns.CNAME); ok {
+		expectedTarget := "target.example.com."
+		if cname.Target != expectedTarget {
+			t.Fatalf("Expected CNAME target %s, got %s", expectedTarget, cname.Target)
+		}
+	} else {
+		t.Fatalf("Expected CNAME record, got %T", answers[0])
+	}
+}
+
+// TestExactUserScenario reproduces the user's exact issue:
+// Query for A record of sdf.foo.stg.test.com should return both CNAME and A record
+func TestExactUserScenario(t *testing.T) {
+	plugin := createTestPlugin()
+
+	// Add the target A record (what ntp.stg.test.com should resolve to)
+	ntpEndpoint := createDNSEndpoint(
+		"ntp-endpoint",
+		"default",
+		"ntp.stg.test.com",
+		"A",
+		[]string{"10.249.255.10"}, // Example IP
+	)
+	err := plugin.OnAdd(ntpEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add ntp A record: %v", err)
+	}
+
+	// Add the CNAME that the user has
+	cnameEndpoint := createDNSEndpoint(
+		"sdf-endpoint",
+		"default",
+		"sdf.foo.stg.test.com",
+		"CNAME",
+		[]string{"ntp.stg.test.com"},
+	)
+	err = plugin.OnAdd(cnameEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to add CNAME record: %v", err)
+	}
+
+	// Now simulate the exact query the user ran:
+	// dig sdf.foo.stg.test.com @10.249.255.2 (asking for A record)
+	req := new(dns.Msg)
+	req.SetQuestion("sdf.foo.stg.test.com.", dns.TypeA)
+
+	writer := &mockResponseWriter{}
+	rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+	if err != nil {
+		t.Fatalf("ServeDNS returned error: %v", err)
+	}
+
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("Expected DNS success, got rcode: %d", rcode)
+	}
+
+	// Verify the response
+	if writer.msg == nil {
+		t.Fatalf("No response message written")
+	}
+
+	answers := writer.msg.Answer
+
+	// The user should get both CNAME and A records, not just CNAME
+	if len(answers) < 2 {
+		t.Fatalf("Expected at least 2 records (CNAME + A), got %d. User would only see CNAME without the fix.", len(answers))
+	}
+
+	// Verify we have both record types
+	var foundCNAME, foundA bool
+	var cnameTarget, aRecord string
+
+	for _, rr := range answers {
+		switch v := rr.(type) {
+		case *dns.CNAME:
+			foundCNAME = true
+			cnameTarget = v.Target
+		case *dns.A:
+			foundA = true
+			aRecord = v.A.String()
+		}
+	}
+
+	if !foundCNAME {
+		t.Fatalf("Expected CNAME record in response")
+	}
+
+	if !foundA {
+		t.Fatalf("Expected A record in response - this was the user's problem! They only got CNAME.")
+	}
+
+	// Verify the CNAME points to the correct target
+	if cnameTarget != "ntp.stg.test.com." {
+		t.Fatalf("Expected CNAME target ntp.stg.test.com., got %s", cnameTarget)
+	}
+
+	// Verify the A record has the correct IP
+	if aRecord != "10.249.255.10" {
+		t.Fatalf("Expected A record IP 10.249.255.10, got %s", aRecord)
+	}
+
+	t.Logf("SUCCESS: Query for A record returned both CNAME (%s) and A record (%s)", cnameTarget, aRecord)
 }
