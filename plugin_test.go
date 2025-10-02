@@ -14,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
-	"sigs.k8s.io/external-dns/endpoint"
 	endpointv1alpha1 "sigs.k8s.io/external-dns/endpoint"
 
 	"github.com/ionos-cloud/coredns-externaldns/internal/cache"
@@ -891,7 +890,7 @@ func createDNSEndpoint(name, namespace, dnsName, recordType string, targets []st
 			Namespace: namespace,
 		},
 		Spec: externaldnsv1alpha1.DNSEndpointSpec{
-			Endpoints: []*endpoint.Endpoint{
+			Endpoints: []*endpointv1alpha1.Endpoint{
 				{
 					DNSName:    dnsName,
 					RecordType: recordType,
@@ -1090,7 +1089,7 @@ func TestMultipleEndpointsUpdateNoDuplication(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: externaldnsv1alpha1.DNSEndpointSpec{
-			Endpoints: []*endpoint.Endpoint{
+			Endpoints: []*endpointv1alpha1.Endpoint{
 				{
 					DNSName:    "app.example.com",
 					RecordType: "CNAME",
@@ -1125,7 +1124,7 @@ func TestMultipleEndpointsUpdateNoDuplication(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: externaldnsv1alpha1.DNSEndpointSpec{
-			Endpoints: []*endpoint.Endpoint{
+			Endpoints: []*endpointv1alpha1.Endpoint{
 				{
 					DNSName:    "app.example.com",
 					RecordType: "CNAME",
@@ -1246,7 +1245,7 @@ func TestPTRRecordCleanupDuringUpdate(t *testing.T) {
 			},
 		},
 		Spec: externaldnsv1alpha1.DNSEndpointSpec{
-			Endpoints: []*endpoint.Endpoint{
+			Endpoints: []*endpointv1alpha1.Endpoint{
 				{
 					DNSName:    "host.example.com",
 					RecordType: "A",
@@ -1285,7 +1284,7 @@ func TestPTRRecordCleanupDuringUpdate(t *testing.T) {
 			},
 		},
 		Spec: externaldnsv1alpha1.DNSEndpointSpec{
-			Endpoints: []*endpoint.Endpoint{
+			Endpoints: []*endpointv1alpha1.Endpoint{
 				{
 					DNSName:    "host.example.com",
 					RecordType: "A",
