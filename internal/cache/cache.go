@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ionos-cloud/coredns-externaldns/internal/utils"
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -54,88 +53,81 @@ func normalizeName(name string) string {
 	return dns.Fqdn(strings.ToLower(name))
 }
 
-// getZoneName extracts zone name from a domain name
-// This uses the shared zone detection logic
-func getZoneName(name string) string {
+// AddRecord adds a DNS record to the cache with the specified zone
+func (c *Cache) AddRecord(name string, zone string, qtype uint16, rr dns.RR) {
 	name = normalizeName(name)
-	return utils.ExtractZoneFromDomain(name)
-}
-
-// AddRecord adds a DNS record to the cache
-func (c *Cache) AddRecord(name string, qtype uint16, rr dns.RR) {
-	name = normalizeName(name)
-	zoneName := getZoneName(name)
+	zoneName := dns.Fqdn(strings.ToLower(zone))
 
 	c.mu.Lock()
-	zone := c.getOrCreateZone(zoneName)
+	zoneObj := c.getOrCreateZone(zoneName)
 	c.mu.Unlock()
 
-	zone.mu.Lock()
-	defer zone.mu.Unlock()
+	zoneObj.mu.Lock()
+	defer zoneObj.mu.Unlock()
 
-	if zone.Records[name] == nil {
-		zone.Records[name] = make(map[uint16][]dns.RR)
+	if zoneObj.Records[name] == nil {
+		zoneObj.Records[name] = make(map[uint16][]dns.RR)
 	}
 
 	// Check for duplicates to avoid unnecessary memory usage
-	for _, existing := range zone.Records[name][qtype] {
+	for _, existing := range zoneObj.Records[name][qtype] {
 		if existing.String() == rr.String() {
 			return // Record already exists
 		}
 	}
 
-	zone.Records[name][qtype] = append(zone.Records[name][qtype], rr)
+	zoneObj.Records[name][qtype] = append(zoneObj.Records[name][qtype], rr)
 
 	// Update metrics after releasing the zone lock to avoid deadlock
 	go c.updateMetrics()
 }
 
 // GetRecords retrieves DNS records from cache
-func (c *Cache) GetRecords(name string, qtype uint16) []dns.RR {
+func (c *Cache) GetRecords(name string, zone string, qtype uint16) []dns.RR {
 	name = normalizeName(name)
-	zoneName := getZoneName(name)
+	zoneName := dns.Fqdn(strings.ToLower(zone))
 
 	c.mu.RLock()
-	zone, exists := c.zones[zoneName]
+	zoneObj, exists := c.zones[zoneName]
 	c.mu.RUnlock()
 
 	if !exists {
-		return c.findWildcardRecords(name, qtype)
+		return c.findWildcardRecords(name, zone, qtype)
 	}
 
-	zone.mu.RLock()
-	defer zone.mu.RUnlock()
+	zoneObj.mu.RLock()
+	defer zoneObj.mu.RUnlock()
 
-	if records, ok := zone.Records[name][qtype]; ok {
+	if records, ok := zoneObj.Records[name][qtype]; ok {
 		result := make([]dns.RR, len(records))
 		copy(result, records)
 		return result
 	}
 
-	return c.findWildcardRecords(name, qtype)
+	return c.findWildcardRecords(name, zone, qtype)
 }
 
 // findWildcardRecords finds wildcard matches for a query
-func (c *Cache) findWildcardRecords(name string, qtype uint16) []dns.RR {
+func (c *Cache) findWildcardRecords(name string, zone string, qtype uint16) []dns.RR {
 	parts := dns.SplitDomainName(name)
+	zoneName := dns.Fqdn(strings.ToLower(zone))
+
+	c.mu.RLock()
+	zoneObj, exists := c.zones[zoneName]
+	c.mu.RUnlock()
+
+	if !exists {
+		return nil
+	}
 
 	// Try wildcard patterns from most specific to least specific
 	for i := 1; i < len(parts); i++ {
 		wildcard := "*." + strings.Join(parts[i:], ".")
 		wildcard = normalizeName(wildcard)
-		zoneName := getZoneName(wildcard)
 
-		c.mu.RLock()
-		zone, exists := c.zones[zoneName]
-		c.mu.RUnlock()
-
-		if !exists {
-			continue
-		}
-
-		zone.mu.RLock()
-		if records, ok := zone.Records[wildcard][qtype]; ok {
-			zone.mu.RUnlock()
+		zoneObj.mu.RLock()
+		if records, ok := zoneObj.Records[wildcard][qtype]; ok {
+			zoneObj.mu.RUnlock()
 			// Return records with the queried name, not wildcard
 			result := make([]dns.RR, len(records))
 			for i, rr := range records {
@@ -145,29 +137,29 @@ func (c *Cache) findWildcardRecords(name string, qtype uint16) []dns.RR {
 			}
 			return result
 		}
-		zone.mu.RUnlock()
+		zoneObj.mu.RUnlock()
 	}
 
 	return nil
 }
 
 // RemoveRecord removes a DNS record from cache
-func (c *Cache) RemoveRecord(name string, qtype uint16, target string) bool {
+func (c *Cache) RemoveRecord(name string, zone string, qtype uint16, target string) bool {
 	name = normalizeName(name)
-	zoneName := getZoneName(name)
+	zoneName := dns.Fqdn(strings.ToLower(zone))
 
 	c.mu.RLock()
-	zone, exists := c.zones[zoneName]
+	zoneObj, exists := c.zones[zoneName]
 	c.mu.RUnlock()
 
 	if !exists {
 		return false
 	}
 
-	zone.mu.Lock()
-	defer zone.mu.Unlock()
+	zoneObj.mu.Lock()
+	defer zoneObj.mu.Unlock()
 
-	records, ok := zone.Records[name][qtype]
+	records, ok := zoneObj.Records[name][qtype]
 	if !ok {
 		return false
 	}
@@ -176,13 +168,13 @@ func (c *Cache) RemoveRecord(name string, qtype uint16, target string) bool {
 		if c.recordMatches(rr, qtype, target) {
 			// Remove record by swapping with last and truncating
 			records[i] = records[len(records)-1]
-			zone.Records[name][qtype] = records[:len(records)-1]
+			zoneObj.Records[name][qtype] = records[:len(records)-1]
 
 			// Clean up empty structures
-			if len(zone.Records[name][qtype]) == 0 {
-				delete(zone.Records[name], qtype)
-				if len(zone.Records[name]) == 0 {
-					delete(zone.Records, name)
+			if len(zoneObj.Records[name][qtype]) == 0 {
+				delete(zoneObj.Records[name], qtype)
+				if len(zoneObj.Records[name]) == 0 {
+					delete(zoneObj.Records, name)
 				}
 			}
 
@@ -196,32 +188,32 @@ func (c *Cache) RemoveRecord(name string, qtype uint16, target string) bool {
 }
 
 // RemoveAllRecords removes all DNS records for a given name and type from cache
-func (c *Cache) RemoveAllRecords(name string, qtype uint16) bool {
+func (c *Cache) RemoveAllRecords(name string, zone string, qtype uint16) bool {
 	name = normalizeName(name)
-	zoneName := getZoneName(name)
+	zoneName := dns.Fqdn(strings.ToLower(zone))
 
 	c.mu.RLock()
-	zone, exists := c.zones[zoneName]
+	zoneObj, exists := c.zones[zoneName]
 	c.mu.RUnlock()
 
 	if !exists {
 		return false
 	}
 
-	zone.mu.Lock()
-	defer zone.mu.Unlock()
+	zoneObj.mu.Lock()
+	defer zoneObj.mu.Unlock()
 
-	_, ok := zone.Records[name][qtype]
+	_, ok := zoneObj.Records[name][qtype]
 	if !ok {
 		return false
 	}
 
 	// Remove all records of this type for this name
-	delete(zone.Records[name], qtype)
+	delete(zoneObj.Records[name], qtype)
 
 	// Clean up empty structures
-	if len(zone.Records[name]) == 0 {
-		delete(zone.Records, name)
+	if len(zoneObj.Records[name]) == 0 {
+		delete(zoneObj.Records, name)
 	}
 
 	// Update metrics after releasing the zone lock to avoid deadlock

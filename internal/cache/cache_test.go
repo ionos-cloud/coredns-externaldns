@@ -62,10 +62,10 @@ func TestAddRecordBasic(t *testing.T) {
 	}
 
 	// This should not hang
-	cache.AddRecord("test.example.com", dns.TypeA, aRecord)
+	cache.AddRecord("test.example.com", "example.com.", dns.TypeA, aRecord)
 
 	// Verify record was added
-	records := cache.GetRecords("test.example.com.", dns.TypeA)
+	records := cache.GetRecords("test.example.com.", "example.com.", dns.TypeA)
 	assert.Len(t, records, 1)
 }
 
@@ -82,7 +82,7 @@ func TestGetZones(t *testing.T) {
 		},
 		A: net.ParseIP("192.168.1.1"),
 	}
-	cache.AddRecord("www.example.com", dns.TypeA, aRecord)
+	cache.AddRecord("www.example.com", "example.com.", dns.TypeA, aRecord)
 
 	zones := cache.GetZones()
 	assert.Contains(t, zones, "example.com.")

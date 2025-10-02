@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
@@ -16,6 +17,7 @@ type Config struct {
 	// Core settings
 	Namespace string
 	TTL       uint32
+	Zones     []string
 
 	// SOA configuration
 	SOA SOAConfig
@@ -125,6 +127,9 @@ func parseExternalDNS(c *caddy.Controller) (*Plugin, error) {
 	config := DefaultConfig()
 
 	for c.Next() {
+		// Parse zone names
+		config.Zones = append(config.Zones, plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), c.ServerBlockKeys)...)
+
 		for c.NextBlock() {
 			switch c.Val() {
 			// Core settings
@@ -203,6 +208,12 @@ func parseExternalDNS(c *caddy.Controller) (*Plugin, error) {
 				}
 				config.ConfigMap.Namespace = c.Val()
 
+			// Authoritative Zones
+			case "authoritative_zones":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				config.Zones = strings.Split(c.Val(), ",")
 			default:
 				return nil, c.Errf("unknown property: %s", c.Val())
 			}

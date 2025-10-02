@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,7 +28,6 @@ import (
 
 	"github.com/ionos-cloud/coredns-externaldns/internal/cache"
 	dnsbuilder "github.com/ionos-cloud/coredns-externaldns/internal/dns"
-	"github.com/ionos-cloud/coredns-externaldns/internal/utils"
 	"github.com/ionos-cloud/coredns-externaldns/internal/watcher"
 )
 
@@ -37,7 +38,8 @@ type Plugin struct {
 	Next plugin.Handler
 
 	// Configuration
-	config *Config
+	config      *Config
+	sortedZones []string // Zones sorted by length (longest first) for efficient matching
 
 	// Dependencies
 	cache         *cache.Cache
@@ -96,8 +98,21 @@ func New(config *Config) *Plugin {
 		EndpointEvents: endpointEvents,
 	}
 
+	// Normalize and sort zones by length (longest first) for efficient matching
+	sortedZones := make([]string, len(config.Zones))
+	for i, zone := range config.Zones {
+		// Normalize each zone once during creation
+		sortedZones[i] = dns.Fqdn(strings.ToLower(zone))
+	}
+
+	// Sort zones by length descending for longest match first
+	sort.Slice(sortedZones, func(i, j int) bool {
+		return len(sortedZones[i]) > len(sortedZones[j])
+	})
+
 	return &Plugin{
 		config:             config,
+		sortedZones:        sortedZones,
 		cache:              cache.New(metrics),
 		metrics:            metrics,
 		zoneSerials:        make(map[string]uint32),
@@ -122,7 +137,7 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	q := r.Question[0]
 	qname := q.Name
 	qtype := q.Qtype
-	zone := getZone(qname)
+	zone := p.getConfiguredZoneForDomain(qname)
 
 	clog.Debugf("DNS request: qname=%s, qtype=%s, zone=%s", qname, dns.TypeToString[qtype], zone)
 
@@ -138,12 +153,12 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	}
 
 	// Try to get records from cache
-	records := p.cache.GetRecords(qname, qtype)
+	records := p.cache.GetRecords(qname, zone, qtype)
 	clog.Debugf("Cache lookup for %s %s returned %d records", qname, dns.TypeToString[qtype], len(records))
 
 	// If no direct records found and querying for A or AAAA, check for CNAME records
 	if len(records) == 0 && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
-		cnameRecords := p.cache.GetRecords(qname, dns.TypeCNAME)
+		cnameRecords := p.cache.GetRecords(qname, zone, dns.TypeCNAME)
 		if len(cnameRecords) > 0 {
 			clog.Debugf("Found %d CNAME records for %s when looking for %s", len(cnameRecords), qname, dns.TypeToString[qtype])
 
@@ -277,7 +292,7 @@ func (p *Plugin) OnAdd(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 			pluginLog.Errorf("Failed to add endpoint record: %v", err)
 			continue
 		}
-		zones[getZone(ep.DNSName)] = true
+		zones[p.getConfiguredZoneForDomain(ep.DNSName)] = true
 	}
 
 	// Update zone serials atomically - only if the serial is actually newer
@@ -316,8 +331,11 @@ func (p *Plugin) OnUpdate(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	for _, ep := range endpoint.Spec.Endpoints {
 		qtype := p.recordBuilder.RecordTypeToQType(ep.RecordType)
 		if qtype != 0 {
+			// Determine the zone for this endpoint
+			zone := p.getConfiguredZoneForDomain(ep.DNSName)
+
 			// Remove all existing records for this name and type
-			p.cache.RemoveAllRecords(ep.DNSName, qtype)
+			p.cache.RemoveAllRecords(ep.DNSName, zone, qtype)
 
 			// Also remove PTR records if they were created
 			if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
@@ -333,7 +351,7 @@ func (p *Plugin) OnUpdate(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 			pluginLog.Errorf("Failed to add endpoint record during update: %v", err)
 			continue
 		}
-		zone := getZone(ep.DNSName)
+		zone := p.getConfiguredZoneForDomain(ep.DNSName)
 		pluginLog.Debugf("OnUpdate: DNSName=%s -> Zone=%s", ep.DNSName, zone)
 		zones[zone] = true
 	}
@@ -370,7 +388,7 @@ func (p *Plugin) OnDelete(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 		if err := p.removeEndpointRecord(ep, createPTR); err != nil {
 			pluginLog.Errorf("Failed to remove endpoint record: %v", err)
 		}
-		zones[getZone(ep.DNSName)] = true
+		zones[p.getConfiguredZoneForDomain(ep.DNSName)] = true
 	}
 
 	// Update zone serials even for deletions
@@ -420,6 +438,9 @@ func (p *Plugin) addEndpointRecord(ep *endpoint.Endpoint, createPTR bool) error 
 		return fmt.Errorf("unsupported record type: %s", ep.RecordType)
 	}
 
+	// Determine the zone for this endpoint using configured zones
+	zone := p.getConfiguredZoneForDomain(ep.DNSName)
+
 	ttl := p.config.TTL
 	if ep.RecordTTL > 0 {
 		ttl = uint32(ep.RecordTTL)
@@ -432,12 +453,13 @@ func (p *Plugin) addEndpointRecord(ep *endpoint.Endpoint, createPTR bool) error 
 			continue
 		}
 
-		p.cache.AddRecord(ep.DNSName, qtype, rr)
+		p.cache.AddRecord(ep.DNSName, zone, qtype, rr)
 
 		// Create PTR record if requested and applicable
 		if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
 			if ptrRR := p.recordBuilder.CreatePTRRecord(target, ep.DNSName, ttl); ptrRR != nil {
-				p.cache.AddRecord(ptrRR.Header().Name, dns.TypePTR, ptrRR)
+				// PTR records typically go in reverse zones, but we'll use the same zone for simplicity
+				p.cache.AddRecord(ptrRR.Header().Name, zone, dns.TypePTR, ptrRR)
 			}
 		}
 	}
@@ -452,13 +474,18 @@ func (p *Plugin) removeEndpointRecord(ep *endpoint.Endpoint, createPTR bool) err
 		return fmt.Errorf("unsupported record type: %s", ep.RecordType)
 	}
 
+	// Determine the zone for this endpoint
+	zone := p.getConfiguredZoneForDomain(ep.DNSName)
+
 	for _, target := range ep.Targets {
-		p.cache.RemoveRecord(ep.DNSName, qtype, target)
+		p.cache.RemoveRecord(ep.DNSName, zone, qtype, target)
 
 		// Remove PTR record if it was created
 		if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
 			if ptrName, err := dns.ReverseAddr(target); err == nil {
-				p.cache.RemoveRecord(ptrName, dns.TypePTR, ep.DNSName)
+				// PTR records are in reverse zones, determine the appropriate zone
+				ptrZone := p.getConfiguredZoneForDomain(ptrName)
+				p.cache.RemoveRecord(ptrName, ptrZone, dns.TypePTR, ep.DNSName)
 			}
 		}
 	}
@@ -483,7 +510,7 @@ func (p *Plugin) generateSerial(endpoint *externaldnsv1alpha1.DNSEndpoint, event
 	// Determine which zones will be affected
 	zones := make(map[string]bool)
 	for _, ep := range endpoint.Spec.Endpoints {
-		zones[getZone(ep.DNSName)] = true
+		zones[p.getConfiguredZoneForDomain(ep.DNSName)] = true
 	}
 
 	p.serialsMutex.RLock()
@@ -552,6 +579,23 @@ func (p *Plugin) createSOARecord(zone string, serial uint32) dns.RR {
 	}
 }
 
+// zoneToConfigKey converts a zone name to a valid ConfigMap key
+// Kubernetes ConfigMap keys cannot be "." so we convert it to "ROOT"
+func (p *Plugin) zoneToConfigKey(zone string) string {
+	if zone == "." {
+		return "ROOT"
+	}
+	return zone
+}
+
+// configKeyToZone converts a ConfigMap key back to a zone name
+func (p *Plugin) configKeyToZone(key string) string {
+	if key == "ROOT" {
+		return "."
+	}
+	return key
+}
+
 // loadZoneSerials loads zone serials from ConfigMap
 func (p *Plugin) loadZoneSerials(ctx context.Context) error {
 	if p.coreClient == nil {
@@ -588,7 +632,9 @@ func (p *Plugin) loadZoneSerials(ctx context.Context) error {
 
 	p.serialsMutex.Lock()
 	p.zoneSerials = make(map[string]uint32)
-	for zone, serialStr := range cm.Data {
+	for configKey, serialStr := range cm.Data {
+		// Convert ConfigMap key back to zone name
+		zone := p.configKeyToZone(configKey)
 		if serial, err := strconv.ParseUint(serialStr, 10, 32); err == nil {
 			p.zoneSerials[zone] = uint32(serial)
 			// Update cache with loaded serial
@@ -613,7 +659,9 @@ func (p *Plugin) saveZoneSerials(ctx context.Context, updatedZones []string) {
 	p.serialsMutex.RLock()
 	data := make(map[string]string)
 	for zone, serial := range p.zoneSerials {
-		data[zone] = strconv.FormatUint(uint64(serial), 10)
+		// Convert zone name to valid ConfigMap key
+		configKey := p.zoneToConfigKey(zone)
+		data[configKey] = strconv.FormatUint(uint64(serial), 10)
 	}
 	rv := p.serialsResourceVersion
 	p.serialsMutex.RUnlock()
@@ -660,15 +708,18 @@ func (p *Plugin) resolveCNAMETarget(target string, qtype uint16, maxHops int) []
 		return nil
 	}
 
+	// Determine the zone for the target
+	targetZone := p.getConfiguredZoneForDomain(target)
+
 	// First, try to get direct A/AAAA records for the target
-	targetRecords := p.cache.GetRecords(target, qtype)
+	targetRecords := p.cache.GetRecords(target, targetZone, qtype)
 	if len(targetRecords) > 0 {
 		clog.Debugf("Found %d %s records for CNAME target %s", len(targetRecords), dns.TypeToString[qtype], target)
 		return targetRecords
 	}
 
 	// If no direct records, check if the target is also a CNAME
-	cnameRecords := p.cache.GetRecords(target, dns.TypeCNAME)
+	cnameRecords := p.cache.GetRecords(target, targetZone, dns.TypeCNAME)
 	if len(cnameRecords) > 0 {
 		clog.Debugf("CNAME target %s is also a CNAME, following chain", target)
 		var allRecords []dns.RR
@@ -699,6 +750,34 @@ func proto(w dns.ResponseWriter) string {
 	return "tcp"
 }
 
-func getZone(name string) string {
-	return utils.ExtractZoneFromDomain(name)
+// getConfiguredZoneForDomain finds the best matching configured zone for a domain
+// Returns the longest matching zone or "." if no match is found
+func (p *Plugin) getConfiguredZoneForDomain(domain string) string {
+	// Normalize the domain
+	domain = dns.Fqdn(strings.ToLower(domain))
+
+	// Remove wildcard prefix if present
+	domain = strings.TrimPrefix(domain, "*.")
+
+	// Find the best matching zone from pre-sorted and pre-normalized zones (longest first)
+	for _, normalizedZone := range p.sortedZones {
+		// Handle root zone specially
+		if normalizedZone == "." {
+			return normalizedZone
+		}
+
+		// Check if domain matches exactly
+		if domain == normalizedZone {
+			return normalizedZone
+		}
+
+		// Check if domain is a subdomain of this zone
+		// Ensure proper zone boundary by checking if domain ends with ".<zone>"
+		if strings.HasSuffix(domain, "."+normalizedZone) {
+			return normalizedZone
+		}
+	}
+
+	// If no configured zone matches, return "." as default
+	return "."
 }

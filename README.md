@@ -34,10 +34,31 @@ make build
         configmap_name zone-serials   # Optional: ConfigMap for serial persistence
         soa_ns ns1.example.com        # Optional: SOA nameserver for AXFR
         soa_mbox admin.example.com    # Optional: SOA mailbox for AXFR
+        authoritative_zones example.com,test.com  # Optional: explicit zone list
     }
     forward . 8.8.8.8
     log
     errors
+}
+```
+
+### Authoritative Zones
+
+Configure `authoritative_zones` to define which DNS zones this plugin serves. This enables proper zone boundaries and DNS NOTIFY functionality.
+
+By default, the plugin uses the zones from the Corefile where it's loaded (e.g., `example.com:53`). Setting `authoritative_zones` overrides this with an explicit zone list.
+
+**Format:** Comma-separated zone list
+```yaml
+authoritative_zones example.com,internal.local,test.net
+```
+
+**With DNS NOTIFY:**
+```yaml
+transfer { to * }
+externaldns {
+    authoritative_zones example.com
+    soa_ns ns1.example.com
 }
 ```
 

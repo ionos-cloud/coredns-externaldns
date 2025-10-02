@@ -168,6 +168,7 @@ func TestSerialGeneration(t *testing.T) {
 	config := &Config{
 		TTL:       300,
 		Namespace: "test",
+		Zones:     []string{"example.com.", "test.com.", "."},
 		SOA: SOAConfig{
 			Nameserver: "ns1.example.com",
 			Mailbox:    "admin.example.com",
@@ -342,6 +343,7 @@ func TestWatcherRestartScenario(t *testing.T) {
 	config := &Config{
 		TTL:       300,
 		Namespace: "test",
+		Zones:     []string{"example.com.", "test.com.", "."},
 		SOA: SOAConfig{
 			Nameserver: "ns1.example.com",
 			Mailbox:    "admin.example.com",
@@ -734,93 +736,39 @@ func (m *mockHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 	return m.handler()
 }
 
-func TestZoneDetectionWithFirstDotApproach(t *testing.T) {
-	tests := []struct {
-		name         string
-		domain       string
-		expectedZone string
-	}{
-		{
-			name:         "Wildcard foo case - the original issue",
-			domain:       "*.foo.stg.test.com",
-			expectedZone: "stg.test.com.",
-		},
-		{
-			name:         "Regular foo subdomain",
-			domain:       "foo.stg.test.com",
-			expectedZone: "stg.test.com.",
-		},
-		{
-			name:         "API in staging",
-			domain:       "api.stg.test.com",
-			expectedZone: "stg.test.com.",
-		},
-		{
-			name:         "Traditional 2-level domain",
-			domain:       "example.com",
-			expectedZone: "com.",
-		},
-		{
-			name:         "Subdomain of 2-level domain",
-			domain:       "www.example.com",
-			expectedZone: "example.com.",
-		},
-		{
-			name:         "Wildcard for 2-level zone",
-			domain:       "*.example.com",
-			expectedZone: "com.",
-		},
-		{
-			name:         "Deep nesting",
-			domain:       "service.api.stg.test.com",
-			expectedZone: "api.stg.test.com.",
-		},
-		{
-			name:         "Wildcard deep nesting",
-			domain:       "*.service.api.stg.test.com",
-			expectedZone: "api.stg.test.com.",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			zone := getZone(test.domain)
-			assert.Equal(t, test.expectedZone, zone,
-				"For domain %s, expected zone %s but got %s",
-				test.domain, test.expectedZone, zone)
-		})
-	}
-}
-
 func TestSpecificZoneIssue(t *testing.T) {
 	// Test the specific issue:
 	// "i have added a record of *.foo.stg.test.com as CNAME
 	// but the log i get for notify is for zone test.com. why is that?"
 
+	// Note: This test now verifies the NEW configuration-based zone matching
+	// instead of the old dynamic zone extraction
+
 	t.Run("Zone notify should be for correct zone", func(t *testing.T) {
 		domain := "*.foo.stg.test.com"
 
-		// This was the OLD incorrect behavior
-		incorrectZone := "test.com."
+		// With the new configuration-based approach,
+		// the zone matching depends on configured zones
+		config := &Config{
+			Zones: []string{"stg.test.com.", "test.com.", "."},
+		}
+		plugin := New(config)
 
-		// This should be the NEW correct behavior
-		correctZone := "stg.test.com."
+		actualZone := plugin.getConfiguredZoneForDomain(domain)
+		expectedZone := "stg.test.com."
 
-		actualZone := getZone(domain)
+		assert.Equal(t, expectedZone, actualZone,
+			"Zone detection failed: expected %s, got %s", expectedZone, actualZone)
 
-		assert.Equal(t, correctZone, actualZone,
-			"Zone detection failed: expected %s, got %s", correctZone, actualZone)
-
-		assert.NotEqual(t, incorrectZone, actualZone,
-			"Zone should NOT be %s (that was the bug)", incorrectZone)
-
-		t.Logf("✅ FIXED: %s now correctly maps to zone %s (was incorrectly %s)",
-			domain, actualZone, incorrectZone)
+		t.Logf("✅ FIXED: %s now correctly maps to zone %s with configured zones",
+			domain, actualZone)
 	})
 
 	// Test that it works end-to-end with the plugin
 	t.Run("End-to-end zone detection in plugin", func(t *testing.T) {
 		config := DefaultConfig()
+		// Configure the zones that should be available for matching
+		config.Zones = []string{"stg.test.com.", "test.com.", "example.com.", "."}
 		plugin := New(config)
 
 		endpoint := &externaldnsv1alpha1.DNSEndpoint{
@@ -920,7 +868,9 @@ func TestCNAMEUpdateNoDuplication(t *testing.T) {
 	}
 
 	// Verify initial record exists
-	records := plugin.cache.GetRecords("sdf.foo.stg.test.com.", dns.TypeCNAME)
+	// For tests, we use the domain itself as the zone or determine via the plugin
+	zone := plugin.getConfiguredZoneForDomain("sdf.foo.stg.test.com.")
+	records := plugin.cache.GetRecords("sdf.foo.stg.test.com.", zone, dns.TypeCNAME)
 	if len(records) != 1 {
 		t.Fatalf("Expected 1 CNAME record, got %d", len(records))
 	}
@@ -951,7 +901,8 @@ func TestCNAMEUpdateNoDuplication(t *testing.T) {
 	}
 
 	// Verify only one CNAME record exists with the new target
-	records = plugin.cache.GetRecords("sdf.foo.stg.test.com.", dns.TypeCNAME)
+	zone = plugin.getConfiguredZoneForDomain("sdf.foo.stg.test.com.")
+	records = plugin.cache.GetRecords("sdf.foo.stg.test.com.", zone, dns.TypeCNAME)
 	if len(records) != 1 {
 		t.Fatalf("Expected 1 CNAME record after update, got %d", len(records))
 	}
@@ -986,7 +937,8 @@ func TestMultipleCNAMETargetsUpdateNoDuplication(t *testing.T) {
 	}
 
 	// Verify initial records exist
-	records := plugin.cache.GetRecords("test.example.com.", dns.TypeCNAME)
+	zone := plugin.getConfiguredZoneForDomain("test.example.com.")
+	records := plugin.cache.GetRecords("test.example.com.", zone, dns.TypeCNAME)
 	if len(records) != 2 {
 		t.Fatalf("Expected 2 CNAME records, got %d", len(records))
 	}
@@ -1007,7 +959,8 @@ func TestMultipleCNAMETargetsUpdateNoDuplication(t *testing.T) {
 	}
 
 	// Verify only one CNAME record exists with the new target
-	records = plugin.cache.GetRecords("test.example.com.", dns.TypeCNAME)
+	zone = plugin.getConfiguredZoneForDomain("test.example.com.")
+	records = plugin.cache.GetRecords("test.example.com.", zone, dns.TypeCNAME)
 	if len(records) != 1 {
 		t.Fatalf("Expected 1 CNAME record after update, got %d", len(records))
 	}
@@ -1042,7 +995,8 @@ func TestARecordUpdateNoDuplication(t *testing.T) {
 	}
 
 	// Verify initial records exist
-	records := plugin.cache.GetRecords("web.example.com.", dns.TypeA)
+	zone := plugin.getConfiguredZoneForDomain("web.example.com.")
+	records := plugin.cache.GetRecords("web.example.com.", zone, dns.TypeA)
 	if len(records) != 2 {
 		t.Fatalf("Expected 2 A records, got %d", len(records))
 	}
@@ -1063,7 +1017,8 @@ func TestARecordUpdateNoDuplication(t *testing.T) {
 	}
 
 	// Verify only one A record exists with the new target
-	records = plugin.cache.GetRecords("web.example.com.", dns.TypeA)
+	zone = plugin.getConfiguredZoneForDomain("web.example.com.")
+	records = plugin.cache.GetRecords("web.example.com.", zone, dns.TypeA)
 	if len(records) != 1 {
 		t.Fatalf("Expected 1 A record after update, got %d", len(records))
 	}
@@ -1111,8 +1066,10 @@ func TestMultipleEndpointsUpdateNoDuplication(t *testing.T) {
 	}
 
 	// Verify initial records exist
-	cnameRecords := plugin.cache.GetRecords("app.example.com.", dns.TypeCNAME)
-	aRecords := plugin.cache.GetRecords("api.example.com.", dns.TypeA)
+	appZone := plugin.getConfiguredZoneForDomain("app.example.com.")
+	cnameRecords := plugin.cache.GetRecords("app.example.com.", appZone, dns.TypeCNAME)
+	apiZone := plugin.getConfiguredZoneForDomain("api.example.com.")
+	aRecords := plugin.cache.GetRecords("api.example.com.", apiZone, dns.TypeA)
 	if len(cnameRecords) != 1 || len(aRecords) != 1 {
 		t.Fatalf("Expected 1 CNAME and 1 A record, got %d CNAME and %d A", len(cnameRecords), len(aRecords))
 	}
@@ -1146,8 +1103,10 @@ func TestMultipleEndpointsUpdateNoDuplication(t *testing.T) {
 	}
 
 	// Verify only new records exist
-	cnameRecords = plugin.cache.GetRecords("app.example.com.", dns.TypeCNAME)
-	aRecords = plugin.cache.GetRecords("api.example.com.", dns.TypeA)
+	appZone = plugin.getConfiguredZoneForDomain("app.example.com.")
+	cnameRecords = plugin.cache.GetRecords("app.example.com.", appZone, dns.TypeCNAME)
+	apiZone = plugin.getConfiguredZoneForDomain("api.example.com.")
+	aRecords = plugin.cache.GetRecords("api.example.com.", apiZone, dns.TypeA)
 	if len(cnameRecords) != 1 || len(aRecords) != 1 {
 		t.Fatalf("Expected 1 CNAME and 1 A record after update, got %d CNAME and %d A", len(cnameRecords), len(aRecords))
 	}
@@ -1209,14 +1168,16 @@ func TestConcurrentUpdatesNoDuplication(t *testing.T) {
 		}
 
 		// Verify only one record exists after each update
-		records := plugin.cache.GetRecords("concurrent.example.com.", dns.TypeCNAME)
+		zone := plugin.getConfiguredZoneForDomain("concurrent.example.com.")
+		records := plugin.cache.GetRecords("concurrent.example.com.", zone, dns.TypeCNAME)
 		if len(records) != 1 {
 			t.Fatalf("Expected 1 CNAME record after update %d, got %d", i, len(records))
 		}
 	}
 
 	// Final verification
-	records := plugin.cache.GetRecords("concurrent.example.com.", dns.TypeCNAME)
+	zone := plugin.getConfiguredZoneForDomain("concurrent.example.com.")
+	records := plugin.cache.GetRecords("concurrent.example.com.", zone, dns.TypeCNAME)
 	if len(records) != 1 {
 		t.Fatalf("Expected 1 CNAME record after all updates, got %d", len(records))
 	}
@@ -1262,14 +1223,16 @@ func TestPTRRecordCleanupDuringUpdate(t *testing.T) {
 	}
 
 	// Verify A record exists
-	aRecords := plugin.cache.GetRecords("host.example.com.", dns.TypeA)
+	hostZone := plugin.getConfiguredZoneForDomain("host.example.com.")
+	aRecords := plugin.cache.GetRecords("host.example.com.", hostZone, dns.TypeA)
 	if len(aRecords) != 1 {
 		t.Fatalf("Expected 1 A record, got %d", len(aRecords))
 	}
 
 	// Verify PTR record exists
 	ptrName := "100.1.168.192.in-addr.arpa."
-	ptrRecords := plugin.cache.GetRecords(ptrName, dns.TypePTR)
+	ptrZone := plugin.getConfiguredZoneForDomain(ptrName)
+	ptrRecords := plugin.cache.GetRecords(ptrName, ptrZone, dns.TypePTR)
 	if len(ptrRecords) != 1 {
 		t.Fatalf("Expected 1 PTR record, got %d", len(ptrRecords))
 	}
@@ -1301,7 +1264,8 @@ func TestPTRRecordCleanupDuringUpdate(t *testing.T) {
 	}
 
 	// Verify A record is updated
-	aRecords = plugin.cache.GetRecords("host.example.com.", dns.TypeA)
+	hostZone = plugin.getConfiguredZoneForDomain("host.example.com.")
+	aRecords = plugin.cache.GetRecords("host.example.com.", hostZone, dns.TypeA)
 	if len(aRecords) != 1 {
 		t.Fatalf("Expected 1 A record after update, got %d", len(aRecords))
 	}
@@ -1316,14 +1280,16 @@ func TestPTRRecordCleanupDuringUpdate(t *testing.T) {
 	}
 
 	// Verify old PTR record is cleaned up
-	oldPtrRecords := plugin.cache.GetRecords(ptrName, dns.TypePTR)
+	oldPtrZone := plugin.getConfiguredZoneForDomain(ptrName)
+	oldPtrRecords := plugin.cache.GetRecords(ptrName, oldPtrZone, dns.TypePTR)
 	if len(oldPtrRecords) != 0 {
 		t.Fatalf("Expected 0 old PTR records after update, got %d", len(oldPtrRecords))
 	}
 
 	// Verify new PTR record exists
 	newPtrName := "50.0.0.10.in-addr.arpa."
-	newPtrRecords := plugin.cache.GetRecords(newPtrName, dns.TypePTR)
+	newPtrZone := plugin.getConfiguredZoneForDomain(newPtrName)
+	newPtrRecords := plugin.cache.GetRecords(newPtrName, newPtrZone, dns.TypePTR)
 	if len(newPtrRecords) != 1 {
 		t.Fatalf("Expected 1 new PTR record after update, got %d", len(newPtrRecords))
 	}
@@ -1349,7 +1315,8 @@ func TestOriginalScenarioReproduction(t *testing.T) {
 	}
 
 	// Verify initial record exists
-	records := plugin.cache.GetRecords("sdf.foo.stg.test.com.", dns.TypeCNAME)
+	zone := plugin.getConfiguredZoneForDomain("sdf.foo.stg.test.com.")
+	records := plugin.cache.GetRecords("sdf.foo.stg.test.com.", zone, dns.TypeCNAME)
 	if len(records) != 1 {
 		t.Fatalf("Expected 1 CNAME record initially, got %d", len(records))
 	}
@@ -1370,7 +1337,8 @@ func TestOriginalScenarioReproduction(t *testing.T) {
 	}
 
 	// Verify only one CNAME record exists (no duplication like in the user's issue)
-	records = plugin.cache.GetRecords("sdf.foo.stg.test.com.", dns.TypeCNAME)
+	zone = plugin.getConfiguredZoneForDomain("sdf.foo.stg.test.com.")
+	records = plugin.cache.GetRecords("sdf.foo.stg.test.com.", zone, dns.TypeCNAME)
 	if len(records) != 1 {
 		t.Fatalf("Expected exactly 1 CNAME record after update, got %d (this would have been 2 with the bug)", len(records))
 	}
@@ -1773,4 +1741,199 @@ func TestExactUserScenario(t *testing.T) {
 	}
 
 	t.Logf("SUCCESS: Query for A record returned both CNAME (%s) and A record (%s)", cnameTarget, aRecord)
+}
+
+func TestConfiguredZoneMatching(t *testing.T) {
+	config := &Config{
+		Zones: []string{"stg.test.com.", "test.com.", "example.com.", "."},
+	}
+	plugin := New(config)
+
+	tests := []struct {
+		name     string
+		domain   string
+		expected string
+	}{
+		{
+			name:     "Wildcard matches longest zone",
+			domain:   "*.foo.stg.test.com",
+			expected: "stg.test.com.",
+		},
+		{
+			name:     "Regular subdomain matches longest zone",
+			domain:   "foo.stg.test.com",
+			expected: "stg.test.com.",
+		},
+		{
+			name:     "Domain matches shorter zone when longer not available",
+			domain:   "app.test.com",
+			expected: "test.com.",
+		},
+		{
+			name:     "Domain matches exactly",
+			domain:   "test.com",
+			expected: "test.com.",
+		},
+		{
+			name:     "Unknown domain falls back to root zone",
+			domain:   "unknown.domain.com",
+			expected: ".",
+		},
+		{
+			name:     "Domain with different TLD falls back to root zone",
+			domain:   "example.net",
+			expected: ".",
+		},
+		{
+			name:     "Case insensitive matching",
+			domain:   "FOO.STG.TEST.COM",
+			expected: "stg.test.com.",
+		},
+		{
+			name:     "FQDN handling",
+			domain:   "app.stg.test.com.",
+			expected: "stg.test.com.",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			zone := plugin.getConfiguredZoneForDomain(test.domain)
+			assert.Equal(t, test.expected, zone,
+				"For domain %s, expected zone %s but got %s",
+				test.domain, test.expected, zone)
+		})
+	}
+}
+
+func TestZoneSorting(t *testing.T) {
+	// Test that longer zones are matched before shorter ones
+	config := &Config{
+		// Deliberately put zones in wrong order to test sorting
+		Zones: []string{".", "test.com.", "stg.test.com.", "example.com."},
+	}
+	plugin := New(config)
+
+	// Should match the longest zone (stg.test.com.) not the shorter ones (test.com. or .)
+	zone := plugin.getConfiguredZoneForDomain("app.stg.test.com")
+	assert.Equal(t, "stg.test.com.", zone)
+}
+
+func TestEmptyZonesConfig(t *testing.T) {
+	config := &Config{
+		Zones: []string{},
+	}
+	plugin := New(config)
+
+	// Should fall back to "." when no zones are configured
+	zone := plugin.getConfiguredZoneForDomain("any.domain.com")
+	assert.Equal(t, ".", zone)
+}
+
+func TestZoneBoundaryMatching(t *testing.T) {
+	// Test that zone boundary detection works correctly to prevent false matches
+	config := &Config{
+		Zones: []string{"example.com.", "ample.com.", "test.com."},
+	}
+	plugin := New(config)
+
+	tests := []struct {
+		name     string
+		domain   string
+		expected string
+	}{
+		{
+			name:     "Should match example.com not ample.com",
+			domain:   "app.example.com",
+			expected: "example.com.",
+		},
+		{
+			name:     "Should match ample.com exactly",
+			domain:   "ample.com",
+			expected: "ample.com.",
+		},
+		{
+			name:     "Should not false match zone suffix",
+			domain:   "notexample.com", // Should NOT match example.com
+			expected: ".",              // Should fall back to root
+		},
+		{
+			name:     "Proper subdomain matching",
+			domain:   "sub.test.com",
+			expected: "test.com.",
+		},
+		{
+			name:     "Should match longest zone first",
+			domain:   "www.example.com",
+			expected: "example.com.", // Not ample.com
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			zone := plugin.getConfiguredZoneForDomain(test.domain)
+			assert.Equal(t, test.expected, zone,
+				"For domain %s, expected zone %s but got %s",
+				test.domain, test.expected, zone)
+		})
+	}
+}
+
+func TestRootZoneOnly(t *testing.T) {
+	config := &Config{
+		Zones: []string{"."},
+	}
+	plugin := New(config)
+
+	tests := []struct {
+		domain   string
+		expected string
+	}{
+		{"example.com", "."},
+		{"*.foo.example.com", "."},
+		{"any.domain", "."},
+	}
+
+	for _, test := range tests {
+		zone := plugin.getConfiguredZoneForDomain(test.domain)
+		assert.Equal(t, test.expected, zone)
+	}
+}
+
+func TestConfigMapKeySanitization(t *testing.T) {
+	config := DefaultConfig()
+	plugin := New(config)
+
+	tests := []struct {
+		name        string
+		zone        string
+		expectedKey string
+	}{
+		{
+			name:        "Root zone sanitization",
+			zone:        ".",
+			expectedKey: "ROOT",
+		},
+		{
+			name:        "Regular zone unchanged",
+			zone:        "example.com.",
+			expectedKey: "example.com.",
+		},
+		{
+			name:        "Test zone unchanged",
+			zone:        "test.com.",
+			expectedKey: "test.com.",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configKey := plugin.zoneToConfigKey(test.zone)
+			assert.Equal(t, test.expectedKey, configKey)
+
+			// Test reverse conversion
+			zone := plugin.configKeyToZone(configKey)
+			assert.Equal(t, test.zone, zone)
+		})
+	}
 }
