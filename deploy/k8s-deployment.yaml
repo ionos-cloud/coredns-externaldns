@@ -95,7 +95,7 @@ spec:
       serviceAccountName: coredns-externaldns
       containers:
       - name: coredns
-        image: coredns-externaldns-standalone:v0.2.1-1-g5cc6207-dirty  # Use your custom build with the plugin
+        image: coredns-externaldns-standalone:latest  # Use your custom build with the plugin
         imagePullPolicy: IfNotPresent
         resources:
           limits:
