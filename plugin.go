@@ -277,9 +277,7 @@ func (p *Plugin) OnAdd(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 			pluginLog.Errorf("Failed to add endpoint record: %v", err)
 			continue
 		}
-		zone := getZone(ep.DNSName)
-		pluginLog.Debugf("OnAdd: DNSName=%s -> Zone=%s", ep.DNSName, zone)
-		zones[zone] = true
+		zones[getZone(ep.DNSName)] = true
 	}
 
 	// Update zone serials atomically - only if the serial is actually newer
