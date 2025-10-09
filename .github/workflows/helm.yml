@@ -58,10 +58,9 @@ jobs:
         if: steps.check-version.outputs.version_changed == 'true'
         run: |
           VERSION="${{ steps.check-version.outputs.version }}"
-          APP_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo main)
 
-          echo "Packaging chart with version: $VERSION and app version: $APP_VERSION"
-          helm package deploy/charts/coredns-externaldns --version "$VERSION" --app-version "$APP_VERSION"
+          echo "Packaging chart with version: $VERSION"
+          helm package deploy/charts/coredns-externaldns --version "$VERSION"
 
           CHART_PACKAGE="coredns-externaldns-${VERSION}.tgz"
           CHART_REGISTRY="${{ env.REGISTRY }}/${{ github.repository }}/charts"
