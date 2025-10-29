@@ -1937,3 +1937,367 @@ func TestConfigMapKeySanitization(t *testing.T) {
 		})
 	}
 }
+
+func TestNXDOMAINForConfiguredZone(t *testing.T) {
+	config := &Config{
+		TTL:       300,
+		Namespace: "test",
+		Zones:     []string{"example.com.", "test.com.", "."},
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.com",
+			Mailbox:    "admin.example.com",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+	plugin := New(config)
+
+	// Set a zone serial for example.com
+	plugin.serialsMutex.Lock()
+	plugin.zoneSerials["example.com."] = 12345
+	plugin.serialsMutex.Unlock()
+
+	t.Run("Query for non-existent domain in configured zone returns NXDOMAIN", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("nonexistent.example.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+
+		require.NotNil(t, writer.msg)
+		assert.True(t, writer.msg.Authoritative, "Response should be authoritative")
+		assert.Equal(t, dns.RcodeNameError, writer.msg.Rcode)
+		assert.Len(t, writer.msg.Answer, 0, "Should have no answer records")
+		assert.Len(t, writer.msg.Ns, 1, "Should have SOA in authority section")
+
+		// Verify SOA record
+		soa, ok := writer.msg.Ns[0].(*dns.SOA)
+		require.True(t, ok, "Authority record should be SOA")
+		assert.Equal(t, "example.com.", soa.Hdr.Name)
+		assert.Equal(t, uint32(12345), soa.Serial)
+		assert.Equal(t, "ns1.example.com.", soa.Ns)
+		assert.Equal(t, "admin.example.com.", soa.Mbox)
+	})
+
+	t.Run("Query for non-existent subdomain returns NXDOMAIN", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("does.not.exist.example.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Ns, 1)
+	})
+
+	t.Run("Query for non-existent AAAA record returns NXDOMAIN", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("missing.example.com.", dns.TypeAAAA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+		assert.True(t, writer.msg.Authoritative)
+	})
+
+	t.Run("Query for non-existent MX record returns NXDOMAIN", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("nomail.example.com.", dns.TypeMX)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+		assert.True(t, writer.msg.Authoritative)
+	})
+}
+
+func TestNXDOMAINForRootZonePassesToNext(t *testing.T) {
+	config := &Config{
+		TTL:       300,
+		Namespace: "test",
+		Zones:     []string{"."},
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.com",
+			Mailbox:    "admin.example.com",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+	plugin := New(config)
+
+	// Set up a mock next plugin
+	nextHandlerCalled := false
+	plugin.Next = &mockHandler{
+		handler: func() (int, error) {
+			nextHandlerCalled = true
+			return dns.RcodeNameError, nil
+		},
+	}
+
+	t.Run("Query for non-existent domain in root zone passes to next plugin", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("unknown.domain.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+		assert.True(t, nextHandlerCalled, "Should pass to next handler for root zone")
+	})
+}
+
+func TestNXDOMAINVsExistingRecords(t *testing.T) {
+	config := &Config{
+		TTL:       300,
+		Namespace: "test",
+		Zones:     []string{"example.com.", "."},
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.com",
+			Mailbox:    "admin.example.com",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+	plugin := New(config)
+
+	// Add an existing A record
+	endpoint := createDNSEndpoint(
+		"existing",
+		"test",
+		"existing.example.com",
+		"A",
+		[]string{"192.168.1.1"},
+	)
+	err := plugin.OnAdd(endpoint)
+	require.NoError(t, err)
+
+	t.Run("Existing record returns success", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("existing.example.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode)
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 1)
+		assert.Len(t, writer.msg.Ns, 0, "Should not have SOA in authority for success")
+	})
+
+	t.Run("Non-existent record returns NXDOMAIN", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("missing.example.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 0)
+		assert.Len(t, writer.msg.Ns, 1, "Should have SOA in authority for NXDOMAIN")
+	})
+}
+
+func TestNXDOMAINWithMultipleZones(t *testing.T) {
+	config := &Config{
+		TTL:       300,
+		Namespace: "test",
+		Zones:     []string{"stg.example.com.", "example.com.", "other.com.", "."},
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.com",
+			Mailbox:    "admin.example.com",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+	plugin := New(config)
+
+	// Set zone serials
+	plugin.serialsMutex.Lock()
+	plugin.zoneSerials["stg.example.com."] = 1001
+	plugin.zoneSerials["example.com."] = 1002
+	plugin.zoneSerials["other.com."] = 1003
+	plugin.serialsMutex.Unlock()
+
+	t.Run("NXDOMAIN in stg.example.com zone has correct SOA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("missing.stg.example.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+
+		require.Len(t, writer.msg.Ns, 1)
+		soa, ok := writer.msg.Ns[0].(*dns.SOA)
+		require.True(t, ok)
+		assert.Equal(t, "stg.example.com.", soa.Hdr.Name, "SOA should be for the most specific matching zone")
+		assert.Equal(t, uint32(1001), soa.Serial)
+	})
+
+	t.Run("NXDOMAIN in example.com zone has correct SOA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("missing.example.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+
+		require.Len(t, writer.msg.Ns, 1)
+		soa, ok := writer.msg.Ns[0].(*dns.SOA)
+		require.True(t, ok)
+		assert.Equal(t, "example.com.", soa.Hdr.Name)
+		assert.Equal(t, uint32(1002), soa.Serial)
+	})
+
+	t.Run("NXDOMAIN in other.com zone has correct SOA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("absent.other.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+
+		require.Len(t, writer.msg.Ns, 1)
+		soa, ok := writer.msg.Ns[0].(*dns.SOA)
+		require.True(t, ok)
+		assert.Equal(t, "other.com.", soa.Hdr.Name)
+		assert.Equal(t, uint32(1003), soa.Serial)
+	})
+}
+
+func TestGetZoneSerial(t *testing.T) {
+	config := DefaultConfig()
+	plugin := New(config)
+
+	t.Run("Returns existing serial for zone", func(t *testing.T) {
+		plugin.serialsMutex.Lock()
+		plugin.zoneSerials["example.com."] = 54321
+		plugin.serialsMutex.Unlock()
+
+		serial := plugin.getZoneSerial("example.com.")
+		assert.Equal(t, uint32(54321), serial)
+	})
+
+	t.Run("Returns current timestamp for non-existent zone", func(t *testing.T) {
+		beforeTime := uint32(time.Now().Unix())
+		serial := plugin.getZoneSerial("unknown.zone.")
+		afterTime := uint32(time.Now().Unix())
+
+		assert.GreaterOrEqual(t, serial, beforeTime)
+		assert.LessOrEqual(t, serial, afterTime)
+	})
+
+	t.Run("Thread-safe access", func(t *testing.T) {
+		plugin.serialsMutex.Lock()
+		plugin.zoneSerials["test.com."] = 99999
+		plugin.serialsMutex.Unlock()
+
+		// Should not deadlock or panic
+		serial := plugin.getZoneSerial("test.com.")
+		assert.Equal(t, uint32(99999), serial)
+	})
+}
+
+func TestNXDOMAINWildcardDomain(t *testing.T) {
+	config := &Config{
+		TTL:       300,
+		Namespace: "test",
+		Zones:     []string{"example.com.", "."},
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.com",
+			Mailbox:    "admin.example.com",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+	plugin := New(config)
+
+	// Add a wildcard CNAME
+	wildcardEndpoint := createDNSEndpoint(
+		"wildcard",
+		"test",
+		"*.wildcard.example.com",
+		"CNAME",
+		[]string{"target.example.com"},
+	)
+	err := plugin.OnAdd(wildcardEndpoint)
+	require.NoError(t, err)
+
+	t.Run("Query matching wildcard returns success", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("anything.wildcard.example.com.", dns.TypeCNAME)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode)
+		assert.Len(t, writer.msg.Answer, 1)
+	})
+
+	t.Run("Query not matching wildcard returns NXDOMAIN", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("notmatch.example.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode)
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Ns, 1)
+	})
+}
+
+func TestNXDOMAINEmptyQuestion(t *testing.T) {
+	config := DefaultConfig()
+	config.Zones = []string{"example.com.", "."}
+	plugin := New(config)
+
+	nextHandlerCalled := false
+	plugin.Next = &mockHandler{
+		handler: func() (int, error) {
+			nextHandlerCalled = true
+			return dns.RcodeSuccess, nil
+		},
+	}
+
+	t.Run("Empty question passes to next handler", func(t *testing.T) {
+		req := new(dns.Msg)
+		// No question set
+
+		writer := &mockResponseWriter{}
+		_, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.True(t, nextHandlerCalled, "Should pass to next handler for empty question")
+	})
+}
