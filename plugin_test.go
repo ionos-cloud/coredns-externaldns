@@ -2616,3 +2616,293 @@ func TestNXDOMAINEmptyQuestion(t *testing.T) {
 		assert.True(t, nextHandlerCalled, "Should pass to next handler for empty question")
 	})
 }
+
+func TestNODATAVsNXDOMAIN(t *testing.T) {
+	config := &Config{
+		TTL:       300,
+		Namespace: "test",
+		Zones:     []string{"staging.example.net.", "example.net.", "."},
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.net",
+			Mailbox:    "admin.example.net",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+	plugin := New(config)
+
+	// Add an A record for server1.staging.example.net
+	endpoint := createDNSEndpoint(
+		"test-endpoint",
+		"test",
+		"server1.staging.example.net",
+		"A",
+		[]string{"192.168.100.10"},
+	)
+	err := plugin.OnAdd(endpoint)
+	require.NoError(t, err)
+
+	// Set zone serial
+	plugin.serialsMutex.Lock()
+	plugin.zoneSerials["staging.example.net."] = 12345
+	plugin.serialsMutex.Unlock()
+
+	t.Run("Query for existing A record returns NOERROR with answer", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("server1.staging.example.net.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode)
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 1, "Should return the A record")
+		assert.Len(t, writer.msg.Ns, 0, "Should not have authority section for successful query")
+
+		// Verify we got the A record
+		aRecord, ok := writer.msg.Answer[0].(*dns.A)
+		require.True(t, ok, "Answer should be an A record")
+		assert.Equal(t, "192.168.100.10", aRecord.A.String())
+	})
+
+	t.Run("Query for non-existent record type returns NODATA (not NXDOMAIN)", func(t *testing.T) {
+		// The domain exists (has an A record) but doesn't have an AAAA record
+		req := new(dns.Msg)
+		req.SetQuestion("server1.staging.example.net.", dns.TypeAAAA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode, "Should return NOERROR (NODATA), not NXDOMAIN")
+		assert.True(t, writer.msg.Authoritative, "Response should be authoritative")
+		assert.Len(t, writer.msg.Answer, 0, "Should have no answer records")
+		assert.Len(t, writer.msg.Ns, 1, "Should have SOA in authority section")
+
+		// Verify SOA in authority section
+		soa, ok := writer.msg.Ns[0].(*dns.SOA)
+		require.True(t, ok, "Authority record should be SOA")
+		assert.Equal(t, "staging.example.net.", soa.Hdr.Name)
+		assert.Equal(t, uint32(12345), soa.Serial)
+	})
+
+	t.Run("Query for MX record on existing domain returns NODATA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("server1.staging.example.net.", dns.TypeMX)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode, "Should return NOERROR (NODATA)")
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 0)
+		assert.Len(t, writer.msg.Ns, 1, "Should have SOA in authority section")
+	})
+
+	t.Run("Query for TXT record on existing domain returns NODATA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("server1.staging.example.net.", dns.TypeTXT)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode, "Should return NOERROR (NODATA)")
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 0)
+		assert.Len(t, writer.msg.Ns, 1)
+	})
+
+	t.Run("Query for non-existent domain returns NXDOMAIN", func(t *testing.T) {
+		// Domain doesn't exist at all
+		req := new(dns.Msg)
+		req.SetQuestion("does-not-exist.staging.example.net.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode, "Should return NXDOMAIN for non-existent domain")
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 0)
+		assert.Len(t, writer.msg.Ns, 1, "Should have SOA in authority section")
+	})
+
+	t.Run("Query for non-existent domain with AAAA type returns NXDOMAIN", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("also-missing.staging.example.net.", dns.TypeAAAA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeNameError, rcode, "Should return NXDOMAIN for non-existent domain")
+		assert.True(t, writer.msg.Authoritative)
+	})
+}
+
+func TestNODATAWithMultipleRecordTypes(t *testing.T) {
+	config := &Config{
+		TTL:       300,
+		Namespace: "test",
+		Zones:     []string{"example.com.", "."},
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.com",
+			Mailbox:    "admin.example.com",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+	plugin := New(config)
+
+	// Add multiple record types for the same domain
+	aEndpoint := createDNSEndpoint(
+		"multi-endpoint",
+		"test",
+		"multi.example.com",
+		"A",
+		[]string{"192.168.1.1"},
+	)
+	err := plugin.OnAdd(aEndpoint)
+	require.NoError(t, err)
+
+	txtEndpoint := createDNSEndpoint(
+		"txt-endpoint",
+		"test",
+		"multi.example.com",
+		"TXT",
+		[]string{"v=spf1 include:_spf.example.com ~all"},
+	)
+	err = plugin.OnAdd(txtEndpoint)
+	require.NoError(t, err)
+
+	t.Run("Query for existing A record returns NOERROR with answer", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("multi.example.com.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode)
+		assert.Len(t, writer.msg.Answer, 1)
+	})
+
+	t.Run("Query for existing TXT record returns NOERROR with answer", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("multi.example.com.", dns.TypeTXT)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode)
+		assert.Len(t, writer.msg.Answer, 1)
+	})
+
+	t.Run("Query for non-existent AAAA on domain with other types returns NODATA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("multi.example.com.", dns.TypeAAAA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode, "Should return NOERROR (NODATA) since domain exists")
+		assert.Len(t, writer.msg.Answer, 0)
+		assert.Len(t, writer.msg.Ns, 1, "Should have SOA in authority section")
+	})
+
+	t.Run("Query for non-existent MX on domain with other types returns NODATA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("multi.example.com.", dns.TypeMX)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode, "Should return NOERROR (NODATA)")
+		assert.Len(t, writer.msg.Answer, 0)
+		assert.Len(t, writer.msg.Ns, 1)
+	})
+}
+
+func TestHostCommandScenario(t *testing.T) {
+	// This test simulates the exact scenario from a host command
+	// host -d server1.staging.example.net 10.20.30.40
+	// First query for A should succeed
+	// Subsequent queries for other types should return NODATA not NXDOMAIN
+
+	config := &Config{
+		TTL:       86400,
+		Namespace: "test",
+		Zones:     []string{"staging.example.net.", "."},
+		SOA: SOAConfig{
+			Nameserver: "ns.staging.example.net",
+			Mailbox:    "admin.staging.example.net",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+	plugin := New(config)
+
+	// Add the A record
+	endpoint := createDNSEndpoint(
+		"server1",
+		"test",
+		"server1.staging.example.net",
+		"A",
+		[]string{"10.20.30.40"},
+	)
+	err := plugin.OnAdd(endpoint)
+	require.NoError(t, err)
+
+	t.Run("First A query returns NOERROR with answer", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("server1.staging.example.net.", dns.TypeA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode)
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 1)
+	})
+
+	t.Run("Second AAAA query returns NODATA (NOERROR with empty answer)", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("server1.staging.example.net.", dns.TypeAAAA)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode, "host command should see NOERROR not NXDOMAIN")
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 0, "Empty answer section")
+		assert.Len(t, writer.msg.Ns, 1, "SOA in authority section")
+	})
+
+	t.Run("Third MX query returns NODATA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("server1.staging.example.net.", dns.TypeMX)
+
+		writer := &mockResponseWriter{}
+		rcode, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, rcode, "host command should see NOERROR not NXDOMAIN")
+		assert.True(t, writer.msg.Authoritative)
+		assert.Len(t, writer.msg.Answer, 0)
+		assert.Len(t, writer.msg.Ns, 1)
+	})
+}
