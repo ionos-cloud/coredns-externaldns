@@ -31,5 +31,5 @@ annotations:
   artifacthub.io/prerelease: "false"
 dependencies:
   - name: coredns
-    version: "1.43.3"
+    version: "1.45.0"
     repository: "https://coredns.github.io/helm"
