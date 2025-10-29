@@ -187,13 +187,33 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 			return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
 		}
 
-		// For configured zones, return authoritative NXDOMAIN
+		// Check if the domain exists with any record type
+		domainExists := p.cache.DomainExists(qname, zone)
+
+		if domainExists {
+			// Domain exists but not this record type - return NODATA (NOERROR with empty answer)
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeSuccess)
+			m.Authoritative = true
+			m.Ns = []dns.RR{p.createSOARecord(zone, p.getZoneSerial(zone))}
+
+			clog.Debugf("Returning NODATA for %s %s in zone %s (domain exists)", qname, dns.TypeToString[qtype], zone)
+
+			if err := w.WriteMsg(m); err != nil {
+				clog.Errorf("Failed to write NODATA response: %v", err)
+				return dns.RcodeServerFailure, err
+			}
+
+			return dns.RcodeSuccess, nil
+		}
+
+		// Domain doesn't exist at all - return authoritative NXDOMAIN
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeNameError)
 		m.Authoritative = true
 		m.Ns = []dns.RR{p.createSOARecord(zone, p.getZoneSerial(zone))}
 
-		clog.Debugf("Returning NXDOMAIN for %s %s in zone %s", qname, dns.TypeToString[qtype], zone)
+		clog.Debugf("Returning NXDOMAIN for %s %s in zone %s (domain does not exist)", qname, dns.TypeToString[qtype], zone)
 
 		if err := w.WriteMsg(m); err != nil {
 			clog.Errorf("Failed to write NXDOMAIN response: %v", err)

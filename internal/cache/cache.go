@@ -406,3 +406,27 @@ func (c *Cache) GetZones() []string {
 	}
 	return zones
 }
+
+// DomainExists checks if a domain has any records in the specified zone
+func (c *Cache) DomainExists(name string, zone string) bool {
+	name = normalizeName(name)
+	zoneName := dns.Fqdn(strings.ToLower(zone))
+
+	c.mu.RLock()
+	zoneObj, exists := c.zones[zoneName]
+	c.mu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	zoneObj.mu.RLock()
+	defer zoneObj.mu.RUnlock()
+
+	// Check if the domain has any records
+	if types, ok := zoneObj.Records[name]; ok && len(types) > 0 {
+		return true
+	}
+
+	return false
+}
