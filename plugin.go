@@ -302,7 +302,6 @@ func (p *Plugin) Transfer(zone string, serial uint32) (<-chan []dns.RR, error) {
 func (p *Plugin) OnAdd(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	pluginLog.Debugf("Adding DNSEndpoint: %s/%s", endpoint.Namespace, endpoint.Name)
 
-	serial := p.generateSerial(endpoint, watch.Added)
 	createPTR := p.shouldCreatePTR(endpoint)
 
 	zones := make(map[string]bool)
@@ -316,8 +315,15 @@ func (p *Plugin) OnAdd(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 
 	// Update zone serials atomically - only if the serial is actually newer
 	updatedZones := make([]string, 0, len(zones))
+
+	serial := p.generateSerial(endpoint, watch.Added)
 	p.serialsMutex.Lock()
 	for zone := range zones {
+		// Skip updating serial for ROOT zone
+		if zone == "." {
+			continue
+		}
+
 		if currentSerial, exists := p.zoneSerials[zone]; !exists || serial > currentSerial {
 			p.zoneSerials[zone] = serial
 			p.cache.SetZoneSerial(zone, serial)
@@ -379,14 +385,20 @@ func (p *Plugin) OnUpdate(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	updatedZones := make([]string, 0, len(zones))
 	p.serialsMutex.Lock()
 	for zone := range zones {
+		// Skip updating serial for ROOT zone
+		if zone == "." {
+			continue
+		}
 		p.zoneSerials[zone] = serial
 		p.cache.SetZoneSerial(zone, serial)
 		updatedZones = append(updatedZones, zone)
 	}
 	p.serialsMutex.Unlock()
 
-	// Save serials to ConfigMap
-	p.saveZoneSerials(p.ctx, updatedZones)
+	// Save serials to ConfigMap only if there were actual updates
+	if len(updatedZones) > 0 {
+		p.saveZoneSerials(p.ctx, updatedZones)
+	}
 
 	if p.metrics.EndpointEvents != nil {
 		p.metrics.EndpointEvents.WithLabelValues("updated").Inc()
@@ -414,14 +426,20 @@ func (p *Plugin) OnDelete(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	updatedZones := make([]string, 0, len(zones))
 	p.serialsMutex.Lock()
 	for zone := range zones {
+		// Skip updating serial for ROOT zone
+		if zone == "." {
+			continue
+		}
 		p.zoneSerials[zone] = serial
 		p.cache.SetZoneSerial(zone, serial)
 		updatedZones = append(updatedZones, zone)
 	}
 	p.serialsMutex.Unlock()
 
-	// Save serials to ConfigMap
-	p.saveZoneSerials(p.ctx, updatedZones)
+	// Save serials to ConfigMap only if there were actual updates
+	if len(updatedZones) > 0 {
+		p.saveZoneSerials(p.ctx, updatedZones)
+	}
 
 	if p.metrics.EndpointEvents != nil {
 		p.metrics.EndpointEvents.WithLabelValues("deleted").Inc()

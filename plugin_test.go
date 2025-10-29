@@ -2277,6 +2277,321 @@ func TestNXDOMAINWildcardDomain(t *testing.T) {
 	})
 }
 
+func TestRootZoneSerialSkipping(t *testing.T) {
+	config := &Config{
+		TTL:       300,
+		Namespace: "test",
+		Zones:     []string{"example.com.", "test.com.", "."}, // Include ROOT zone
+		SOA: SOAConfig{
+			Nameserver: "ns1.example.com",
+			Mailbox:    "admin.example.com",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "test-serials",
+			Namespace: "test",
+		},
+	}
+
+	plugin := New(config)
+
+	now := time.Now()
+
+	t.Run("OnAdd with ROOT zone domain skips serial update", func(t *testing.T) {
+		// Create an endpoint that would map to ROOT zone (not matching any configured zone)
+		endpoint := &externaldnsv1alpha1.DNSEndpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "root-zone-endpoint",
+				Namespace:         "test",
+				CreationTimestamp: metav1.NewTime(now),
+				Generation:        1,
+				ResourceVersion:   "1001",
+			},
+			Spec: externaldnsv1alpha1.DNSEndpointSpec{
+				Endpoints: []*endpointv1alpha1.Endpoint{
+					{
+						DNSName:    "unmatched.domain.org", // Doesn't match any configured zone except ROOT
+						Targets:    []string{"1.2.3.4"},
+						RecordType: "A",
+					},
+				},
+			},
+		}
+
+		err := plugin.OnAdd(endpoint)
+		require.NoError(t, err)
+
+		// Verify that ROOT zone serial was NOT updated
+		plugin.serialsMutex.RLock()
+		_, hasRootSerial := plugin.zoneSerials["."]
+		plugin.serialsMutex.RUnlock()
+
+		assert.False(t, hasRootSerial, "ROOT zone (.) should not have serial updated")
+
+		// Verify the record was still added to cache
+		zone := plugin.getConfiguredZoneForDomain("unmatched.domain.org")
+		assert.Equal(t, ".", zone, "Domain should match ROOT zone")
+		records := plugin.cache.GetRecords("unmatched.domain.org.", zone, dns.TypeA)
+		assert.Len(t, records, 1, "Record should be added to cache even though serial not updated")
+	})
+
+	t.Run("OnAdd with non-ROOT zone updates serial normally", func(t *testing.T) {
+		endpoint := &externaldnsv1alpha1.DNSEndpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "example-zone-endpoint",
+				Namespace:         "test",
+				CreationTimestamp: metav1.NewTime(now),
+				Generation:        1,
+				ResourceVersion:   "1002",
+			},
+			Spec: externaldnsv1alpha1.DNSEndpointSpec{
+				Endpoints: []*endpointv1alpha1.Endpoint{
+					{
+						DNSName:    "app.example.com",
+						Targets:    []string{"1.2.3.5"},
+						RecordType: "A",
+					},
+				},
+			},
+		}
+
+		err := plugin.OnAdd(endpoint)
+		require.NoError(t, err)
+
+		// Verify that example.com. zone serial WAS updated
+		plugin.serialsMutex.RLock()
+		serial, hasSerial := plugin.zoneSerials["example.com."]
+		plugin.serialsMutex.RUnlock()
+
+		assert.True(t, hasSerial, "example.com. zone should have serial updated")
+		assert.Greater(t, serial, uint32(0), "Serial should be set")
+	})
+
+	t.Run("OnUpdate with ROOT zone domain skips serial update", func(t *testing.T) {
+		endpoint := &externaldnsv1alpha1.DNSEndpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "root-zone-update",
+				Namespace:         "test",
+				CreationTimestamp: metav1.NewTime(now),
+				Generation:        2,
+				ResourceVersion:   "1003",
+			},
+			Spec: externaldnsv1alpha1.DNSEndpointSpec{
+				Endpoints: []*endpointv1alpha1.Endpoint{
+					{
+						DNSName:    "another.unmatched.net",
+						Targets:    []string{"2.3.4.5"},
+						RecordType: "A",
+					},
+				},
+			},
+		}
+
+		// First add
+		err := plugin.OnAdd(endpoint)
+		require.NoError(t, err)
+
+		// Verify ROOT zone serial is still not set
+		plugin.serialsMutex.RLock()
+		_, hasRootSerial := plugin.zoneSerials["."]
+		plugin.serialsMutex.RUnlock()
+		assert.False(t, hasRootSerial, "ROOT zone should not have serial after add")
+
+		// Now update
+		endpoint.Spec.Endpoints[0].Targets = []string{"3.4.5.6"}
+		err = plugin.OnUpdate(endpoint)
+		require.NoError(t, err)
+
+		// Verify ROOT zone serial is STILL not set
+		plugin.serialsMutex.RLock()
+		_, hasRootSerialAfterUpdate := plugin.zoneSerials["."]
+		plugin.serialsMutex.RUnlock()
+		assert.False(t, hasRootSerialAfterUpdate, "ROOT zone should not have serial after update")
+	})
+
+	t.Run("OnUpdate with non-ROOT zone updates serial normally", func(t *testing.T) {
+		endpoint := &externaldnsv1alpha1.DNSEndpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "test-zone-update",
+				Namespace:         "test",
+				CreationTimestamp: metav1.NewTime(now),
+				Generation:        1,
+				ResourceVersion:   "1004",
+			},
+			Spec: externaldnsv1alpha1.DNSEndpointSpec{
+				Endpoints: []*endpointv1alpha1.Endpoint{
+					{
+						DNSName:    "service.test.com",
+						Targets:    []string{"10.0.0.1"},
+						RecordType: "A",
+					},
+				},
+			},
+		}
+
+		err := plugin.OnAdd(endpoint)
+		require.NoError(t, err)
+
+		plugin.serialsMutex.RLock()
+		initialSerial := plugin.zoneSerials["test.com."]
+		plugin.serialsMutex.RUnlock()
+
+		// Update
+		endpoint.Spec.Endpoints[0].Targets = []string{"10.0.0.2"}
+		err = plugin.OnUpdate(endpoint)
+		require.NoError(t, err)
+
+		plugin.serialsMutex.RLock()
+		updatedSerial := plugin.zoneSerials["test.com."]
+		plugin.serialsMutex.RUnlock()
+
+		assert.Greater(t, updatedSerial, initialSerial, "Serial should increment after update")
+	})
+
+	t.Run("OnDelete with ROOT zone domain skips serial update", func(t *testing.T) {
+		endpoint := &externaldnsv1alpha1.DNSEndpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "root-zone-delete",
+				Namespace:         "test",
+				CreationTimestamp: metav1.NewTime(now),
+				Generation:        1,
+				ResourceVersion:   "1005",
+			},
+			Spec: externaldnsv1alpha1.DNSEndpointSpec{
+				Endpoints: []*endpointv1alpha1.Endpoint{
+					{
+						DNSName:    "todelete.unmatched.io",
+						Targets:    []string{"5.6.7.8"},
+						RecordType: "A",
+					},
+				},
+			},
+		}
+
+		// Add first
+		err := plugin.OnAdd(endpoint)
+		require.NoError(t, err)
+
+		// Verify ROOT zone serial is not set
+		plugin.serialsMutex.RLock()
+		_, hasRootSerial := plugin.zoneSerials["."]
+		plugin.serialsMutex.RUnlock()
+		assert.False(t, hasRootSerial, "ROOT zone should not have serial")
+
+		// Delete
+		err = plugin.OnDelete(endpoint)
+		require.NoError(t, err)
+
+		// Verify ROOT zone serial is STILL not set
+		plugin.serialsMutex.RLock()
+		_, hasRootSerialAfterDelete := plugin.zoneSerials["."]
+		plugin.serialsMutex.RUnlock()
+		assert.False(t, hasRootSerialAfterDelete, "ROOT zone should not have serial after delete")
+	})
+
+	t.Run("OnDelete with non-ROOT zone updates serial normally", func(t *testing.T) {
+		endpoint := &externaldnsv1alpha1.DNSEndpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "example-zone-delete",
+				Namespace:         "test",
+				CreationTimestamp: metav1.NewTime(now),
+				Generation:        1,
+				ResourceVersion:   "1006",
+			},
+			Spec: externaldnsv1alpha1.DNSEndpointSpec{
+				Endpoints: []*endpointv1alpha1.Endpoint{
+					{
+						DNSName:    "todelete.example.com",
+						Targets:    []string{"6.7.8.9"},
+						RecordType: "A",
+					},
+				},
+			},
+		}
+
+		// Add first
+		err := plugin.OnAdd(endpoint)
+		require.NoError(t, err)
+
+		plugin.serialsMutex.RLock()
+		serialBeforeDelete := plugin.zoneSerials["example.com."]
+		plugin.serialsMutex.RUnlock()
+
+		// Delete
+		err = plugin.OnDelete(endpoint)
+		require.NoError(t, err)
+
+		plugin.serialsMutex.RLock()
+		serialAfterDelete := plugin.zoneSerials["example.com."]
+		plugin.serialsMutex.RUnlock()
+
+		assert.Greater(t, serialAfterDelete, serialBeforeDelete, "Serial should increment after delete")
+	})
+
+	t.Run("Mixed zones: ROOT and non-ROOT in same endpoint", func(t *testing.T) {
+		endpoint := &externaldnsv1alpha1.DNSEndpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "mixed-zones-endpoint",
+				Namespace:         "test",
+				CreationTimestamp: metav1.NewTime(now),
+				Generation:        1,
+				ResourceVersion:   "1007",
+			},
+			Spec: externaldnsv1alpha1.DNSEndpointSpec{
+				Endpoints: []*endpointv1alpha1.Endpoint{
+					{
+						DNSName:    "mixed.example.com", // Matches example.com.
+						Targets:    []string{"7.8.9.10"},
+						RecordType: "A",
+					},
+					{
+						DNSName:    "unmatched.other.tld", // Matches ROOT (.)
+						Targets:    []string{"8.9.10.11"},
+						RecordType: "A",
+					},
+				},
+			},
+		}
+
+		err := plugin.OnAdd(endpoint)
+		require.NoError(t, err)
+
+		// Verify example.com. has serial
+		plugin.serialsMutex.RLock()
+		_, hasExampleSerial := plugin.zoneSerials["example.com."]
+		_, hasRootSerial := plugin.zoneSerials["."]
+		plugin.serialsMutex.RUnlock()
+
+		assert.True(t, hasExampleSerial, "example.com. should have serial")
+		assert.False(t, hasRootSerial, "ROOT zone (.) should NOT have serial")
+
+		// Verify both records are in cache
+		zone1 := plugin.getConfiguredZoneForDomain("mixed.example.com")
+		records1 := plugin.cache.GetRecords("mixed.example.com.", zone1, dns.TypeA)
+		assert.Len(t, records1, 1)
+
+		zone2 := plugin.getConfiguredZoneForDomain("unmatched.other.tld")
+		records2 := plugin.cache.GetRecords("unmatched.other.tld.", zone2, dns.TypeA)
+		assert.Len(t, records2, 1)
+	})
+
+	t.Run("ConfigMap should not contain ROOT key", func(t *testing.T) {
+		// After all operations above, verify ROOT never gets into zoneSerials
+		plugin.serialsMutex.RLock()
+		allSerials := make(map[string]uint32)
+		for k, v := range plugin.zoneSerials {
+			allSerials[k] = v
+		}
+		plugin.serialsMutex.RUnlock()
+
+		// Check that "." is never in the map
+		_, hasRoot := allSerials["."]
+		assert.False(t, hasRoot, "ROOT zone (.) should never be in zoneSerials map")
+
+		// Verify we have serials for other zones
+		assert.Greater(t, len(allSerials), 0, "Should have serials for non-ROOT zones")
+	})
+}
+
 func TestNXDOMAINEmptyQuestion(t *testing.T) {
 	config := DefaultConfig()
 	config.Zones = []string{"example.com.", "."}
