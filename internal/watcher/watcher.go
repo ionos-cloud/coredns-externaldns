@@ -91,7 +91,7 @@ func (w *DNSEndpointWatcher) initialSync(resourceInterface dynamic.ResourceInter
 		}
 
 		if err := w.handler.OnAdd(endpoint); err != nil {
-			log.Errorf("Failed to handle initial DNSEndpoint %s/%s: %v", 
+			log.Errorf("Failed to handle initial DNSEndpoint %s/%s: %v",
 				endpoint.Namespace, endpoint.Name, err)
 		}
 	}
@@ -143,7 +143,8 @@ func (w *DNSEndpointWatcher) runWatch(resourceInterface dynamic.ResourceInterfac
 			return nil
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
-				return fmt.Errorf("watch channel closed")
+				log.Debug("Watch channel closed, will restart")
+				return nil
 			}
 
 			if err := w.handleEvent(event); err != nil {
