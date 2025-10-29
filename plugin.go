@@ -179,9 +179,28 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	}
 
 	if len(records) == 0 {
-		// No records found, pass to next plugin
-		clog.Debugf("No records found for %s %s, passing to next plugin", qname, dns.TypeToString[qtype])
-		return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
+		// No records found
+		clog.Debugf("No records found for %s %s", qname, dns.TypeToString[qtype])
+
+		// If not in a configured zone, pass to next plugin
+		if zone == "." {
+			return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
+		}
+
+		// For configured zones, return authoritative NXDOMAIN
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeNameError)
+		m.Authoritative = true
+		m.Ns = []dns.RR{p.createSOARecord(zone, p.getZoneSerial(zone))}
+
+		clog.Debugf("Returning NXDOMAIN for %s %s in zone %s", qname, dns.TypeToString[qtype], zone)
+
+		if err := w.WriteMsg(m); err != nil {
+			clog.Errorf("Failed to write NXDOMAIN response: %v", err)
+			return dns.RcodeServerFailure, err
+		}
+
+		return dns.RcodeNameError, nil
 	}
 
 	// Create response
@@ -699,6 +718,16 @@ func (p *Plugin) saveZoneSerials(ctx context.Context, updatedZones []string) {
 	}
 
 	pluginLog.Debugf("Updated ConfigMap with %d zone serials", len(data))
+}
+
+// getZoneSerial retrieves the serial number for a zone
+func (p *Plugin) getZoneSerial(zone string) uint32 {
+	p.serialsMutex.RLock()
+	defer p.serialsMutex.RUnlock()
+	if serial, exists := p.zoneSerials[zone]; exists {
+		return serial
+	}
+	return uint32(time.Now().Unix())
 }
 
 // resolveCNAMETarget resolves a CNAME target to get the actual A/AAAA records
