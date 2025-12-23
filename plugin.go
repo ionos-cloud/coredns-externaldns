@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -42,10 +43,12 @@ type Plugin struct {
 	sortedZones []string // Zones sorted by length (longest first) for efficient matching
 
 	// Dependencies
-	cache         *cache.Cache
-	watcher       *watcher.DNSEndpointWatcher
-	transfer      *transfer.Transfer
-	recordBuilder *dnsbuilder.RecordBuilder
+	cache          *cache.Cache
+	watcher        *watcher.DNSEndpointWatcher
+	serviceWatcher *watcher.ServiceWatcher
+	ingressWatcher *watcher.IngressWatcher
+	transfer       *transfer.Transfer
+	recordBuilder  *dnsbuilder.RecordBuilder
 
 	// Kubernetes clients
 	client     dynamic.Interface
@@ -268,6 +271,18 @@ func (p *Plugin) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start watcher: %w", err)
 	}
 
+	// Create and start the service watcher
+	p.serviceWatcher = watcher.NewServiceWatcher(p.coreClient, p.config.Namespace, p)
+	if err := p.serviceWatcher.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start service watcher: %w", err)
+	}
+
+	// Create and start the ingress watcher
+	p.ingressWatcher = watcher.NewIngressWatcher(p.coreClient, p.config.Namespace, p)
+	if err := p.ingressWatcher.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start ingress watcher: %w", err)
+	}
+
 	pluginLog.Info("ExternalDNS plugin started successfully")
 	return nil
 }
@@ -279,6 +294,12 @@ func (p *Plugin) Stop() {
 	}
 	if p.watcher != nil {
 		p.watcher.Stop()
+	}
+	if p.serviceWatcher != nil {
+		p.serviceWatcher.Stop()
+	}
+	if p.ingressWatcher != nil {
+		p.ingressWatcher.Stop()
 	}
 	pluginLog.Info("ExternalDNS plugin stopped")
 }
@@ -323,20 +344,115 @@ func (p *Plugin) OnAdd(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 	pluginLog.Debugf("Adding DNSEndpoint: %s/%s", endpoint.Namespace, endpoint.Name)
 
 	createPTR := p.shouldCreatePTR(endpoint)
+	serial := p.generateSerial(endpoint, watch.Added)
+
+	return p.processEndpoints(endpoint.Spec.Endpoints, createPTR, watch.Added, serial)
+}
+
+// OnUpdate handles DNSEndpoint update events
+func (p *Plugin) OnUpdate(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
+	pluginLog.Debugf("Updating DNSEndpoint: %s/%s", endpoint.Namespace, endpoint.Name)
+
+	createPTR := p.shouldCreatePTR(endpoint)
+	serial := p.generateSerial(endpoint, watch.Modified)
+
+	return p.processEndpoints(endpoint.Spec.Endpoints, createPTR, watch.Modified, serial)
+}
+
+// OnDelete handles DNSEndpoint deletion events
+func (p *Plugin) OnDelete(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
+	pluginLog.Debugf("Deleting DNSEndpoint: %s/%s", endpoint.Namespace, endpoint.Name)
+
+	createPTR := p.shouldCreatePTR(endpoint)
+	serial := p.generateSerial(endpoint, watch.Deleted)
+
+	return p.processEndpoints(endpoint.Spec.Endpoints, createPTR, watch.Deleted, serial)
+}
+
+// OnServiceAdd handles Service addition events
+func (p *Plugin) OnServiceAdd(svc *corev1.Service) error {
+	pluginLog.Debugf("Adding Service: %s/%s", svc.Namespace, svc.Name)
+	return p.processService(svc, watch.Added)
+}
+
+// OnServiceUpdate handles Service update events
+func (p *Plugin) OnServiceUpdate(svc *corev1.Service) error {
+	pluginLog.Debugf("Updating Service: %s/%s", svc.Namespace, svc.Name)
+	return p.processService(svc, watch.Modified)
+}
+
+// OnServiceDelete handles Service deletion events
+func (p *Plugin) OnServiceDelete(svc *corev1.Service) error {
+	pluginLog.Debugf("Deleting Service: %s/%s", svc.Namespace, svc.Name)
+	return p.processService(svc, watch.Deleted)
+}
+
+func (p *Plugin) processService(svc *corev1.Service, eventType watch.EventType) error {
+	endpoints := p.getEndpointsFromService(svc)
+	if len(endpoints) == 0 {
+		return nil
+	}
+
+	createPTR := p.shouldCreatePTR(svc)
 
 	zones := make(map[string]bool)
-	for _, ep := range endpoint.Spec.Endpoints {
-		if err := p.addEndpointRecord(ep, createPTR); err != nil {
-			pluginLog.Errorf("Failed to add endpoint record: %v", err)
-			continue
-		}
+	for _, ep := range endpoints {
 		zones[p.getConfiguredZoneForDomain(ep.DNSName)] = true
 	}
 
-	// Update zone serials atomically - only if the serial is actually newer
-	updatedZones := make([]string, 0, len(zones))
+	serial := p.getNextSerial(zones)
+	return p.processEndpoints(endpoints, createPTR, eventType, serial)
+}
 
-	serial := p.generateSerial(endpoint, watch.Added)
+func (p *Plugin) processEndpoints(endpoints []*endpoint.Endpoint, createPTR bool, eventType watch.EventType, serial uint32) error {
+	if eventType == watch.Deleted {
+		for _, ep := range endpoints {
+			if err := p.removeEndpointRecord(ep, createPTR); err != nil {
+				pluginLog.Errorf("Failed to remove endpoint record: %v", err)
+			}
+		}
+	} else {
+		// Added or Modified
+		if eventType == watch.Modified {
+			for _, ep := range endpoints {
+				qtype := p.recordBuilder.RecordTypeToQType(ep.RecordType)
+				if qtype != 0 {
+					zone := p.getConfiguredZoneForDomain(ep.DNSName)
+					p.cache.RemoveAllRecords(ep.DNSName, zone, qtype)
+					if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
+						p.cache.RemoveAllPTRRecordsForName(ep.DNSName)
+					}
+				}
+			}
+		}
+
+		for _, ep := range endpoints {
+			if err := p.addEndpointRecord(ep, createPTR); err != nil {
+				pluginLog.Errorf("Failed to add endpoint record: %v", err)
+				continue
+			}
+		}
+	}
+
+	// Update metrics
+	if p.metrics.EndpointEvents != nil {
+		label := "added"
+		switch eventType {
+		case watch.Modified:
+			label = "updated"
+		case watch.Deleted:
+			label = "deleted"
+		}
+		p.metrics.EndpointEvents.WithLabelValues(label).Inc()
+	}
+
+	// Update zone serials
+	zones := make(map[string]bool)
+	for _, ep := range endpoints {
+		zones[p.getConfiguredZoneForDomain(ep.DNSName)] = true
+	}
+
+	updatedZones := make([]string, 0, len(zones))
 	p.serialsMutex.Lock()
 	for zone := range zones {
 		// Skip updating serial for ROOT zone
@@ -357,115 +473,174 @@ func (p *Plugin) OnAdd(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
 		p.saveZoneSerials(p.ctx, updatedZones)
 	}
 
-	if p.metrics.EndpointEvents != nil {
-		p.metrics.EndpointEvents.WithLabelValues("added").Inc()
-	}
-
 	return nil
 }
 
-// OnUpdate handles DNSEndpoint update events
-func (p *Plugin) OnUpdate(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
-	pluginLog.Debugf("Updating DNSEndpoint: %s/%s", endpoint.Namespace, endpoint.Name)
+func (p *Plugin) getEndpointsFromService(svc *corev1.Service) []*endpoint.Endpoint {
+	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		return nil
+	}
 
-	serial := p.generateSerial(endpoint, watch.Modified)
-	createPTR := p.shouldCreatePTR(endpoint)
+	hostname, ok := svc.Annotations["external-dns.alpha.kubernetes.io/hostname"]
+	if !ok || hostname == "" {
+		return nil
+	}
 
-	// For updates, we need to clean up all existing records for this endpoint
-	// since the old targets might be different from the new ones
-	for _, ep := range endpoint.Spec.Endpoints {
-		qtype := p.recordBuilder.RecordTypeToQType(ep.RecordType)
-		if qtype != 0 {
-			// Determine the zone for this endpoint
-			zone := p.getConfiguredZoneForDomain(ep.DNSName)
+	var endpoints []*endpoint.Endpoint
+	ttlVal := endpoint.TTL(p.config.TTL)
+	// Check for TTL annotation
+	if ttlStr, ok := svc.Annotations["external-dns.alpha.kubernetes.io/ttl"]; ok {
+		if t, err := strconv.Atoi(ttlStr); err == nil {
+			ttlVal = endpoint.TTL(t)
+		}
+	}
 
-			// Remove all existing records for this name and type
-			p.cache.RemoveAllRecords(ep.DNSName, zone, qtype)
+	hostnames := strings.SplitSeq(hostname, ",")
 
-			// Also remove PTR records if they were created
-			if createPTR && (qtype == dns.TypeA || qtype == dns.TypeAAAA) {
-				// Remove all PTR records pointing to this DNS name
-				p.cache.RemoveAllPTRRecordsForName(ep.DNSName)
+	for host := range hostnames {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+
+		for _, ingress := range svc.Status.LoadBalancer.Ingress {
+			if ingress.IP != "" {
+				endpoints = append(endpoints, &endpoint.Endpoint{
+					DNSName:    host,
+					Targets:    endpoint.Targets{ingress.IP},
+					RecordType: "A",
+					RecordTTL:  ttlVal,
+				})
+			}
+			if ingress.Hostname != "" {
+				endpoints = append(endpoints, &endpoint.Endpoint{
+					DNSName:    host,
+					Targets:    endpoint.Targets{ingress.Hostname},
+					RecordType: "CNAME",
+					RecordTTL:  ttlVal,
+				})
 			}
 		}
 	}
 
-	zones := make(map[string]bool)
-	for _, ep := range endpoint.Spec.Endpoints {
-		if err := p.addEndpointRecord(ep, createPTR); err != nil {
-			pluginLog.Errorf("Failed to add endpoint record during update: %v", err)
-			continue
-		}
-		zone := p.getConfiguredZoneForDomain(ep.DNSName)
-		pluginLog.Debugf("OnUpdate: DNSName=%s -> Zone=%s", ep.DNSName, zone)
-		zones[zone] = true
-	}
-
-	// Update zone serials
-	updatedZones := make([]string, 0, len(zones))
-	p.serialsMutex.Lock()
-	for zone := range zones {
-		// Skip updating serial for ROOT zone
-		if zone == "." {
-			continue
-		}
-		p.zoneSerials[zone] = serial
-		p.cache.SetZoneSerial(zone, serial)
-		updatedZones = append(updatedZones, zone)
-	}
-	p.serialsMutex.Unlock()
-
-	// Save serials to ConfigMap only if there were actual updates
-	if len(updatedZones) > 0 {
-		p.saveZoneSerials(p.ctx, updatedZones)
-	}
-
-	if p.metrics.EndpointEvents != nil {
-		p.metrics.EndpointEvents.WithLabelValues("updated").Inc()
-	}
-
-	return nil
+	return endpoints
 }
 
-// OnDelete handles DNSEndpoint deletion events
-func (p *Plugin) OnDelete(endpoint *externaldnsv1alpha1.DNSEndpoint) error {
-	pluginLog.Debugf("Deleting DNSEndpoint: %s/%s", endpoint.Namespace, endpoint.Name)
+// OnIngressAdd handles Ingress addition events
+func (p *Plugin) OnIngressAdd(ing *networkingv1.Ingress) error {
+	pluginLog.Debugf("Adding Ingress: %s/%s", ing.Namespace, ing.Name)
+	return p.processIngress(ing, watch.Added)
+}
 
-	serial := p.generateSerial(endpoint, watch.Deleted)
-	createPTR := p.shouldCreatePTR(endpoint)
+// OnIngressUpdate handles Ingress update events
+func (p *Plugin) OnIngressUpdate(ing *networkingv1.Ingress) error {
+	pluginLog.Debugf("Updating Ingress: %s/%s", ing.Namespace, ing.Name)
+	return p.processIngress(ing, watch.Modified)
+}
+
+// OnIngressDelete handles Ingress deletion events
+func (p *Plugin) OnIngressDelete(ing *networkingv1.Ingress) error {
+	pluginLog.Debugf("Deleting Ingress: %s/%s", ing.Namespace, ing.Name)
+	return p.processIngress(ing, watch.Deleted)
+}
+
+func (p *Plugin) processIngress(ing *networkingv1.Ingress, eventType watch.EventType) error {
+	endpoints := p.getEndpointsFromIngress(ing)
+	if len(endpoints) == 0 {
+		return nil
+	}
+
+	createPTR := p.shouldCreatePTR(ing)
 
 	zones := make(map[string]bool)
-	for _, ep := range endpoint.Spec.Endpoints {
-		if err := p.removeEndpointRecord(ep, createPTR); err != nil {
-			pluginLog.Errorf("Failed to remove endpoint record: %v", err)
-		}
+	for _, ep := range endpoints {
 		zones[p.getConfiguredZoneForDomain(ep.DNSName)] = true
 	}
 
-	// Update zone serials even for deletions
-	updatedZones := make([]string, 0, len(zones))
-	p.serialsMutex.Lock()
-	for zone := range zones {
-		// Skip updating serial for ROOT zone
-		if zone == "." {
-			continue
+	serial := p.getNextSerial(zones)
+	return p.processEndpoints(endpoints, createPTR, eventType, serial)
+}
+
+func (p *Plugin) getEndpointsFromIngress(ing *networkingv1.Ingress) []*endpoint.Endpoint {
+	var endpoints []*endpoint.Endpoint
+	ttlVal := endpoint.TTL(p.config.TTL)
+
+	// Check for TTL annotation
+	if ttlStr, ok := ing.Annotations["external-dns.alpha.kubernetes.io/ttl"]; ok {
+		if t, err := strconv.Atoi(ttlStr); err == nil {
+			ttlVal = endpoint.TTL(t)
 		}
-		p.zoneSerials[zone] = serial
-		p.cache.SetZoneSerial(zone, serial)
-		updatedZones = append(updatedZones, zone)
-	}
-	p.serialsMutex.Unlock()
-
-	// Save serials to ConfigMap only if there were actual updates
-	if len(updatedZones) > 0 {
-		p.saveZoneSerials(p.ctx, updatedZones)
 	}
 
-	if p.metrics.EndpointEvents != nil {
-		p.metrics.EndpointEvents.WithLabelValues("deleted").Inc()
+	// Get targets from Ingress status
+	var targets endpoint.Targets
+	for _, ingress := range ing.Status.LoadBalancer.Ingress {
+		if ingress.IP != "" {
+			targets = append(targets, ingress.IP)
+		}
+		if ingress.Hostname != "" {
+			targets = append(targets, ingress.Hostname)
+		}
 	}
 
-	return nil
+	if len(targets) == 0 {
+		return nil
+	}
+
+	// Determine hosts to use
+	var hosts []string
+	seenHosts := make(map[string]bool)
+
+	if hostname, ok := ing.Annotations["external-dns.alpha.kubernetes.io/hostname"]; ok && hostname != "" {
+		// Use explicitly defined hostname(s)
+		for _, h := range strings.Split(hostname, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				if !seenHosts[h] {
+					hosts = append(hosts, h)
+					seenHosts[h] = true
+				}
+			}
+		}
+	}
+
+	if val, ok := ing.Annotations["coredns-externaldns.ionos.cloud/ingress-from-rules"]; ok && (val == "true" || val == "1") {
+		// Use hosts from Ingress rules if enabled via annotation
+		for _, rule := range ing.Spec.Rules {
+			if rule.Host != "" {
+				if !seenHosts[rule.Host] {
+					hosts = append(hosts, rule.Host)
+					seenHosts[rule.Host] = true
+				}
+			}
+		}
+	}
+
+	if len(hosts) == 0 {
+		return nil
+	}
+
+	// Create endpoints for each host
+	for _, host := range hosts {
+		targetsByRecordType := make(map[string]endpoint.Targets)
+		for _, target := range targets {
+			recordType := "A"
+			if net.ParseIP(target) == nil {
+				recordType = "CNAME"
+			}
+			targetsByRecordType[recordType] = append(targetsByRecordType[recordType], target)
+		}
+
+		for recordType, t := range targetsByRecordType {
+			endpoints = append(endpoints, &endpoint.Endpoint{
+				DNSName:    host,
+				Targets:    t,
+				RecordType: recordType,
+				RecordTTL:  ttlVal,
+			})
+		}
+	}
+
+	return endpoints
 }
 
 // initializeClients initializes Kubernetes clients
@@ -551,8 +726,8 @@ func (p *Plugin) removeEndpointRecord(ep *endpoint.Endpoint, createPTR bool) err
 }
 
 // shouldCreatePTR checks if PTR records should be created
-func (p *Plugin) shouldCreatePTR(endpoint *externaldnsv1alpha1.DNSEndpoint) bool {
-	annotations := endpoint.GetAnnotations()
+func (p *Plugin) shouldCreatePTR(obj metav1.Object) bool {
+	annotations := obj.GetAnnotations()
 	if annotations == nil {
 		return false
 	}
@@ -564,12 +739,23 @@ func (p *Plugin) shouldCreatePTR(endpoint *externaldnsv1alpha1.DNSEndpoint) bool
 // generateSerial generates a serial number for the DNSEndpoint
 // Uses a resource-based approach that's idempotent and doesn't depend on event types
 func (p *Plugin) generateSerial(endpoint *externaldnsv1alpha1.DNSEndpoint, eventType watch.EventType) uint32 {
+	if eventType == watch.Added {
+		// For ADD events, always use resource-based serial for idempotency
+		// This ensures same resource always gets same serial regardless of watcher restarts
+		return p.calculateResourceSerial(endpoint)
+	}
+
 	// Determine which zones will be affected
 	zones := make(map[string]bool)
 	for _, ep := range endpoint.Spec.Endpoints {
 		zones[p.getConfiguredZoneForDomain(ep.DNSName)] = true
 	}
 
+	return p.getNextSerial(zones)
+}
+
+// getNextSerial calculates the next serial number for the given zones
+func (p *Plugin) getNextSerial(zones map[string]bool) uint32 {
 	p.serialsMutex.RLock()
 	defer p.serialsMutex.RUnlock()
 
@@ -582,21 +768,10 @@ func (p *Plugin) generateSerial(endpoint *externaldnsv1alpha1.DNSEndpoint, event
 		}
 	}
 
-	switch eventType {
-	case watch.Added:
-		// For ADD events, always use resource-based serial for idempotency
-		// This ensures same resource always gets same serial regardless of watcher restarts
-		return p.calculateResourceSerial(endpoint)
-
-	case watch.Modified, watch.Deleted:
-		// Always increment for actual changes to ensure forward movement
-		if maxSerial == 0 {
-			return uint32(time.Now().Unix())
-		}
-		return maxSerial + 1
-	default:
+	if maxSerial == 0 {
 		return uint32(time.Now().Unix())
 	}
+	return maxSerial + 1
 }
 
 // calculateResourceSerial calculates a deterministic serial based on resource metadata
