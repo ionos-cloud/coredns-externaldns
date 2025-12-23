@@ -4,7 +4,10 @@ A CoreDNS plugin that serves DNS records from external-dns DNSEndpoint CRDs.
 
 ## How It Works
 
-1. **Watches DNSEndpoint CRDs** in Kubernetes for DNS record definitions
+1. **Watches Kubernetes Resources**:
+   - **DNSEndpoint CRDs** for generic DNS record definitions
+   - **Services** (Type LoadBalancer) for automatic service discovery
+   - **Ingresses** for HTTP/HTTPS routing discovery
 2. **Caches records in memory** for fast DNS query responses  
 3. **Serves DNS queries** directly from the cache
 4. **Auto-generates PTR records** when enabled via annotation
@@ -79,13 +82,95 @@ spec:
     recordTTL: 300
 ```
 
+## Service Support
+
+The plugin automatically creates DNS records for Services of type `LoadBalancer`.
+
+### Requirements
+- Service must be of type `LoadBalancer`
+- Must have `external-dns.alpha.kubernetes.io/hostname` annotation
+
+### Example
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: nginx.example.com
+    external-dns.alpha.kubernetes.io/ttl: "60"
+    coredns-externaldns.ionos.cloud/create-ptr: "true"
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+  selector:
+    app: nginx
+```
+
+## Ingress Support
+
+The plugin automatically creates DNS records for Ingress resources.
+
+### Configuration
+Hostnames are discovered from the following sources (can be combined):
+1. **Explicit Hostname**: Using `external-dns.alpha.kubernetes.io/hostname` annotation
+2. **From Rules**: Using `coredns-externaldns.ionos.cloud/ingress-from-rules: "true"` annotation to use hosts defined in `spec.rules`
+
+If both are present, records will be created for all unique hostnames found.
+
+### Example (Explicit Hostname)
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: nginx.example.com
+    coredns-externaldns.ionos.cloud/create-ptr: "true"
+spec:
+  rules:
+  - host: nginx.internal
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: nginx
+            port:
+              number: 80
+```
+
+### Example (From Rules)
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx
+  annotations:
+    coredns-externaldns.ionos.cloud/ingress-from-rules: "true"
+spec:
+  rules:
+  - host: app.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: app
+            port:
+              number: 80
+```
+
 ## PTR Record Feature
 
 The plugin can automatically create reverse DNS (PTR) records for A and AAAA records.
 
 ### How to Enable
 
-Add this annotation to your DNSEndpoint:
+Add this annotation to your DNSEndpoint, Service, or Ingress:
 
 ```yaml
 metadata:
@@ -114,8 +199,11 @@ rules:
   resources: ["dnsendpoints"]
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "list", "create", "update"]
+  resources: ["services", "configmaps"]
+  verbs: ["get", "list", "watch", "create", "update"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
 ```
 
 ## Supported Record Types
