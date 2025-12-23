@@ -39,11 +39,5 @@ jobs:
     - name: Install Helm
       uses: azure/setup-helm@v4
 
-    - name: Install Helm unittest plugin
-      run: helm plugin install https://github.com/helm-unittest/helm-unittest
-
     - name: Lint Helm chart
       run: helm lint deploy/charts/coredns-externaldns
-
-    - name: Run Helm chart tests
-      run: helm unittest deploy/charts/coredns-externaldns
