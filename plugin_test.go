@@ -11,6 +11,8 @@ import (
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
@@ -2905,4 +2907,181 @@ func TestHostCommandScenario(t *testing.T) {
 		assert.Len(t, writer.msg.Answer, 0)
 		assert.Len(t, writer.msg.Ns, 1)
 	})
+}
+
+func TestProcessService(t *testing.T) {
+	config := &Config{
+		Namespace: "default",
+		TTL:       300,
+		Zones:     []string{"example.com"},
+	}
+	p := New(config)
+
+	// Case 1: Valid LoadBalancer Service
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nginx",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"external-dns.alpha.kubernetes.io/hostname": "nginx.example.com",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer,
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{IP: "1.2.3.4"},
+				},
+			},
+		},
+	}
+
+	err := p.OnServiceAdd(svc)
+	require.NoError(t, err)
+
+	// Verify A record
+	records := p.cache.GetRecords("nginx.example.com", "example.com", dns.TypeA)
+	require.Len(t, records, 1)
+	aRec := records[0].(*dns.A)
+	assert.Equal(t, "1.2.3.4", aRec.A.String())
+
+	// Case 2: Service ignored (ClusterIP)
+	svcClusterIP := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "clusterip",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"external-dns.alpha.kubernetes.io/hostname": "cluster.example.com",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeClusterIP,
+		},
+	}
+	err = p.OnServiceAdd(svcClusterIP)
+	require.NoError(t, err)
+	records = p.cache.GetRecords("cluster.example.com", "example.com", dns.TypeA)
+	assert.Len(t, records, 0)
+}
+
+func TestProcessIngress(t *testing.T) {
+	config := &Config{
+		Namespace: "default",
+		TTL:       300,
+		Zones:     []string{"example.com"},
+	}
+	p := New(config)
+
+	// Case 1: Explicit Hostname
+	ingExplicit := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "explicit",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"external-dns.alpha.kubernetes.io/hostname": "explicit.example.com",
+			},
+		},
+		Status: networkingv1.IngressStatus{
+			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+				Ingress: []networkingv1.IngressLoadBalancerIngress{
+					{IP: "1.2.3.4"},
+				},
+			},
+		},
+	}
+	err := p.OnIngressAdd(ingExplicit)
+	require.NoError(t, err)
+	records := p.cache.GetRecords("explicit.example.com", "example.com", dns.TypeA)
+	require.Len(t, records, 1)
+	assert.Equal(t, "1.2.3.4", records[0].(*dns.A).A.String())
+
+	// Case 2: From Rules (Enabled)
+	ingRules := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rules",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"coredns-externaldns.ionos.cloud/ingress-from-rules": "true",
+			},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{Host: "rule.example.com"},
+			},
+		},
+		Status: networkingv1.IngressStatus{
+			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+				Ingress: []networkingv1.IngressLoadBalancerIngress{
+					{IP: "5.6.7.8"},
+				},
+			},
+		},
+	}
+	err = p.OnIngressAdd(ingRules)
+	require.NoError(t, err)
+	records = p.cache.GetRecords("rule.example.com", "example.com", dns.TypeA)
+	require.Len(t, records, 1)
+	assert.Equal(t, "5.6.7.8", records[0].(*dns.A).A.String())
+
+	// Case 3: From Rules (Disabled/Missing Annotation)
+	ingRulesDisabled := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rules-disabled",
+			Namespace: "default",
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{Host: "ignored.example.com"},
+			},
+		},
+		Status: networkingv1.IngressStatus{
+			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+				Ingress: []networkingv1.IngressLoadBalancerIngress{
+					{IP: "9.9.9.9"},
+				},
+			},
+		},
+	}
+	err = p.OnIngressAdd(ingRulesDisabled)
+	require.NoError(t, err)
+	records = p.cache.GetRecords("ignored.example.com", "example.com", dns.TypeA)
+	assert.Len(t, records, 0)
+
+	// Case 4: Combined (Both Explicit and Rules)
+	ingCombined := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "combined",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"external-dns.alpha.kubernetes.io/hostname":          "combined-explicit.example.com",
+				"coredns-externaldns.ionos.cloud/ingress-from-rules": "true",
+			},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{Host: "combined-rule.example.com"},
+			},
+		},
+		Status: networkingv1.IngressStatus{
+			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+				Ingress: []networkingv1.IngressLoadBalancerIngress{
+					{IP: "10.10.10.10"},
+				},
+			},
+		},
+	}
+	err = p.OnIngressAdd(ingCombined)
+	require.NoError(t, err)
+
+	// Check explicit
+	records = p.cache.GetRecords("combined-explicit.example.com", "example.com", dns.TypeA)
+	require.Len(t, records, 1)
+	assert.Equal(t, "10.10.10.10", records[0].(*dns.A).A.String())
+
+	// Check rule
+	records = p.cache.GetRecords("combined-rule.example.com", "example.com", dns.TypeA)
+	require.Len(t, records, 1)
+	assert.Equal(t, "10.10.10.10", records[0].(*dns.A).A.String())
 }

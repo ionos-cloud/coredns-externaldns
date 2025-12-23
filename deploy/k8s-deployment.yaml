@@ -51,6 +51,14 @@ rules:
 - apiGroups: ["externaldns.k8s.io"]
   resources: ["dnsendpoints"]
   verbs: ["get", "list", "watch"]
+# Service permissions
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch"]
+# Ingress permissions
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
 # ConfigMap permissions for CoreDNS configuration
 - apiGroups: [""]
   resources: ["configmaps"]
