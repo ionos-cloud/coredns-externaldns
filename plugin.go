@@ -155,6 +155,27 @@ func (p *Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 		return dns.RcodeRefused, nil
 	}
 
+	// Handle SOA queries for zones we're authoritative for
+	// This is critical for BIND/secondary DNS servers checking serial numbers before IXFR/AXFR
+	if qtype == dns.TypeSOA && zone != "." {
+		// Check if the query is for the zone apex (the zone itself)
+		normalizedQname := dns.Fqdn(strings.ToLower(qname))
+		if normalizedQname == zone {
+			m := new(dns.Msg)
+			m.SetReply(r)
+			m.Authoritative = true
+			m.Answer = []dns.RR{p.createSOARecord(zone, p.getZoneSerial(zone))}
+
+			clog.Debugf("Responding to SOA query for zone %s with serial %d", zone, p.getZoneSerial(zone))
+
+			if err := w.WriteMsg(m); err != nil {
+				clog.Errorf("Failed to write SOA response for zone %s: %v", zone, err)
+				return dns.RcodeServerFailure, err
+			}
+			return dns.RcodeSuccess, nil
+		}
+	}
+
 	// Try to get records from cache
 	records := p.cache.GetRecords(qname, zone, qtype)
 	clog.Debugf("Cache lookup for %s %s returned %d records", qname, dns.TypeToString[qtype], len(records))

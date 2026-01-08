@@ -3085,3 +3085,163 @@ func TestProcessIngress(t *testing.T) {
 	require.Len(t, records, 1)
 	assert.Equal(t, "10.10.10.10", records[0].(*dns.A).A.String())
 }
+
+// TestSOAQueryForZoneApex tests that SOA queries for zone apexes return the SOA record
+// in the answer section. This is critical for BIND/secondary DNS servers that query
+// SOA to check serial numbers before initiating IXFR/AXFR transfers.
+func TestSOAQueryForZoneApex(t *testing.T) {
+	config := &Config{
+		Namespace: "default",
+		TTL:       300,
+		Zones:     []string{"example.com", "test.net"},
+		SOA: SOAConfig{
+			Nameserver: "ns.example.com",
+			Mailbox:    "admin.example.com",
+		},
+		ConfigMap: ConfigMapConfig{
+			Name:      "zone-serials",
+			Namespace: "default",
+		},
+	}
+
+	plugin := New(config)
+
+	// Set a known serial for testing
+	plugin.serialsMutex.Lock()
+	plugin.zoneSerials["example.com."] = 2024010101
+	plugin.zoneSerials["test.net."] = 2024010102
+	plugin.serialsMutex.Unlock()
+
+	t.Run("SOA query for zone apex returns SOA in answer section", func(t *testing.T) {
+		writer := &mockResponseWriter{}
+
+		req := new(dns.Msg)
+		req.SetQuestion("example.com.", dns.TypeSOA)
+
+		code, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		require.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code)
+		require.NotNil(t, writer.msg)
+
+		// SOA should be in Answer section, NOT in Authority (Ns) section
+		require.Len(t, writer.msg.Answer, 1, "SOA should be in answer section")
+		assert.Len(t, writer.msg.Ns, 0, "Authority section should be empty")
+
+		soaRecord, ok := writer.msg.Answer[0].(*dns.SOA)
+		require.True(t, ok, "Expected SOA record but got %T", writer.msg.Answer[0])
+		assert.Equal(t, "example.com.", soaRecord.Hdr.Name)
+		assert.Equal(t, uint32(2024010101), soaRecord.Serial)
+		assert.Equal(t, "ns.example.com.", soaRecord.Ns)
+		assert.Equal(t, "admin.example.com.", soaRecord.Mbox)
+
+		// Verify response is authoritative
+		assert.True(t, writer.msg.Authoritative, "Response should be authoritative")
+	})
+
+	t.Run("SOA query for second configured zone", func(t *testing.T) {
+		writer := &mockResponseWriter{}
+
+		req := new(dns.Msg)
+		req.SetQuestion("test.net.", dns.TypeSOA)
+
+		code, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		require.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code)
+		require.NotNil(t, writer.msg)
+
+		require.Len(t, writer.msg.Answer, 1)
+		soaRecord, ok := writer.msg.Answer[0].(*dns.SOA)
+		require.True(t, ok)
+		assert.Equal(t, "test.net.", soaRecord.Hdr.Name)
+		assert.Equal(t, uint32(2024010102), soaRecord.Serial)
+	})
+
+	t.Run("SOA query for subdomain returns NODATA (not zone apex)", func(t *testing.T) {
+		// Add a record for the subdomain so it exists
+		plugin.cache.AddRecord("www.example.com.", "example.com.", dns.TypeA, &dns.A{
+			Hdr: dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP("192.168.1.1"),
+		})
+
+		writer := &mockResponseWriter{}
+
+		req := new(dns.Msg)
+		req.SetQuestion("www.example.com.", dns.TypeSOA)
+
+		code, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		require.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code) // NODATA is success with empty answer
+		require.NotNil(t, writer.msg)
+
+		// For NODATA, answer should be empty and SOA should be in authority section
+		assert.Len(t, writer.msg.Answer, 0, "Answer should be empty for NODATA")
+		require.Len(t, writer.msg.Ns, 1, "SOA should be in authority section for NODATA")
+
+		soaRecord, ok := writer.msg.Ns[0].(*dns.SOA)
+		require.True(t, ok)
+		assert.Equal(t, "example.com.", soaRecord.Hdr.Name)
+	})
+
+	t.Run("SOA query for unconfigured zone passes to next plugin", func(t *testing.T) {
+		nextCalled := false
+		plugin.Next = &mockHandler{
+			handler: func() (int, error) {
+				nextCalled = true
+				return dns.RcodeNameError, nil
+			},
+		}
+
+		writer := &mockResponseWriter{}
+
+		req := new(dns.Msg)
+		req.SetQuestion("unconfigured.org.", dns.TypeSOA)
+
+		_, _ = plugin.ServeDNS(context.Background(), writer, req)
+
+		assert.True(t, nextCalled, "Should pass to next plugin for unconfigured zone")
+	})
+
+	t.Run("SOA query uses current serial from zoneSerials map", func(t *testing.T) {
+		// Update the serial
+		plugin.serialsMutex.Lock()
+		plugin.zoneSerials["example.com."] = 2024010199
+		plugin.serialsMutex.Unlock()
+
+		writer := &mockResponseWriter{}
+
+		req := new(dns.Msg)
+		req.SetQuestion("example.com.", dns.TypeSOA)
+
+		code, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		require.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code)
+		require.NotNil(t, writer.msg)
+		require.Len(t, writer.msg.Answer, 1)
+
+		soaRecord := writer.msg.Answer[0].(*dns.SOA)
+		assert.Equal(t, uint32(2024010199), soaRecord.Serial, "Should use updated serial")
+	})
+
+	t.Run("SOA query is case insensitive", func(t *testing.T) {
+		writer := &mockResponseWriter{}
+
+		req := new(dns.Msg)
+		req.SetQuestion("EXAMPLE.COM.", dns.TypeSOA)
+
+		code, err := plugin.ServeDNS(context.Background(), writer, req)
+
+		require.NoError(t, err)
+		assert.Equal(t, dns.RcodeSuccess, code)
+		require.NotNil(t, writer.msg)
+		require.Len(t, writer.msg.Answer, 1)
+
+		soaRecord, ok := writer.msg.Answer[0].(*dns.SOA)
+		require.True(t, ok)
+		// The response name should match the query name
+		assert.Equal(t, "example.com.", soaRecord.Hdr.Name)
+	})
+}
