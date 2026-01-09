@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/coredns/caddy v1.1.4
-	github.com/coredns/coredns v1.13.2
+	github.com/coredns/coredns v1.14.0
 	github.com/miekg/dns v1.1.69
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
@@ -38,7 +38,7 @@ require (
 	github.com/DataDog/datadog-agent/pkg/util/scrubber v0.71.2 // indirect
 	github.com/DataDog/datadog-agent/pkg/version v0.71.2 // indirect
 	github.com/DataDog/datadog-go/v5 v5.8.1 // indirect
-	github.com/DataDog/dd-trace-go/v2 v2.4.0 // indirect
+	github.com/DataDog/dd-trace-go/v2 v2.4.1 // indirect
 	github.com/DataDog/go-libddwaf/v4 v4.6.1 // indirect
 	github.com/DataDog/go-runtime-metrics-internal v0.0.4-0.20250721125240-fdf1ef85b633 // indirect
 	github.com/DataDog/go-sqllexer v0.1.9 // indirect
@@ -57,7 +57,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.16 // indirect
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.62.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.40.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.0.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.8 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.12 // indirect
@@ -135,7 +135,7 @@ require (
 	github.com/opentracing/opentracing-go v1.2.1-0.20220228012449-10b1cf09e00b // indirect
 	github.com/openzipkin-contrib/zipkin-go-opentracing v0.5.0 // indirect
 	github.com/openzipkin/zipkin-go v0.4.3 // indirect
-	github.com/oschwald/geoip2-golang/v2 v2.0.1 // indirect
+	github.com/oschwald/geoip2-golang/v2 v2.1.0 // indirect
 	github.com/oschwald/maxminddb-golang/v2 v2.1.1 // indirect
 	github.com/outcaste-io/ristretto v0.2.3 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
