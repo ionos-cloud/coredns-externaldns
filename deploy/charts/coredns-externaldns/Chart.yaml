@@ -12,5 +12,5 @@ maintainers:
     url: https://github.com/ionos-cloud
 dependencies:
   - name: coredns
-    version: "1.45.0"
+    version: 1.45.2
     repository: "https://coredns.github.io/helm"
