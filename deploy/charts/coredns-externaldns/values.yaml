@@ -3,7 +3,7 @@ coredns:
   # Override the default CoreDNS image to use one with external-dns plugin
   image:
     repository: ghcr.io/ionos-cloud/coredns-externaldns
-    tag: "v0.3.3"
+    tag: "0.4.1"
 
   # Use our own rbac
   rbac:
